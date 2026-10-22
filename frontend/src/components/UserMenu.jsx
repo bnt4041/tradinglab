@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, UserCog, Settings, LogOut } from "lucide-react";
+import { ChevronDown, UserCog, Settings, LogOut, ShieldCheck } from "lucide-react";
 
 function Avatar({ user, size = 36 }) {
   return (
@@ -12,7 +12,7 @@ function Avatar({ user, size = 36 }) {
   );
 }
 
-export default function UserMenu({ currentUser, onOpenProfile, onOpenSettings, onLogout }) {
+export default function UserMenu({ currentUser, onOpenProfile, onOpenSettings, onOpenAdmin, onLogout }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
@@ -46,12 +46,22 @@ export default function UserMenu({ currentUser, onOpenProfile, onOpenSettings, o
             <button onClick={() => { onOpenProfile(); setOpen(false); }} className="btn-primary mt-3 w-full !py-2 text-xs">
               <UserCog className="h-4 w-4" /> Mi perfil · ajustar cartera
             </button>
-            <button
-              onClick={() => { onOpenSettings?.(); setOpen(false); }}
-              className="mt-2 flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200"
-            >
-              <Settings className="h-4 w-4" /> Ajustes de IA
-            </button>
+            {currentUser?.isAdmin && (
+              <>
+                <button
+                  onClick={() => { onOpenSettings?.(); setOpen(false); }}
+                  className="mt-2 flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <Settings className="h-4 w-4" /> Ajustes de IA
+                </button>
+                <button
+                  onClick={() => { onOpenAdmin?.(); setOpen(false); }}
+                  className="mt-2 flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200"
+                >
+                  <ShieldCheck className="h-4 w-4" /> Administración
+                </button>
+              </>
+            )}
           </div>
           <div className="p-2">
             <button

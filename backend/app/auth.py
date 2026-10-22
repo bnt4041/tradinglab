@@ -14,7 +14,6 @@ import os
 import secrets
 import time
 
-from . import database
 from .database import USER_COLORS, _ensure_account, get_conn
 
 SESSION_DAYS = 30
@@ -37,10 +36,6 @@ def _verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(dk.hex(), hash_hex)
 
 
-def _public(row: dict) -> dict:
-    return {"id": row["id"], "name": row["name"], "color": row["color"]}
-
-
 def register(name: str, email: str, password: str) -> dict:
     name = (name or "").strip()
     email = (email or "").strip().lower()
@@ -57,11 +52,17 @@ def register(name: str, email: str, password: str) -> dict:
         if conn.execute("SELECT 1 FROM users WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
             raise ValueError("Ese nombre ya está en uso")
 
+        # La primera cuenta real que se registra en la instancia es la admin
+        # (no hay nadie más a quien pedírselo: bootstrap automático).
+        is_first = conn.execute(
+            "SELECT 1 FROM users WHERE password_hash IS NOT NULL LIMIT 1"
+        ).fetchone() is None
+
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         color = USER_COLORS[count % len(USER_COLORS)]
         cur = conn.execute(
-            "INSERT INTO users (name, color, created_at, email, password_hash) VALUES (?, ?, ?, ?, ?)",
-            (name, color, time.time(), email, _hash_password(password)),
+            "INSERT INTO users (name, color, created_at, email, password_hash, is_admin) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, color, time.time(), email, _hash_password(password), 1 if is_first else 0),
         )
         user_id = cur.lastrowid
         _ensure_account(conn, user_id)
@@ -109,3 +110,76 @@ def get_user_id_from_token(token: str | None) -> int | None:
 def cleanup_expired_sessions() -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
+
+
+def is_admin(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        return bool(row and row["is_admin"])
+
+
+# ---------------- Restablecer contraseña ----------------
+# No hay SMTP configurado en este despliegue, así que no hay email de
+# recuperación: el usuario "solicita" el reset (queda marcado y visible
+# para el admin en /api/admin/users) y el admin le pone una contraseña
+# nueva manualmente, por el canal que sea (WhatsApp, en persona...).
+def request_password_reset(email: str) -> None:
+    email = (email or "").strip().lower()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET reset_requested_at = ? WHERE email = ? AND password_hash IS NOT NULL",
+            (time.time(), email),
+        )
+    # Deliberadamente no informamos si el email existe o no (evita que se
+    # pueda usar este endpoint para enumerar cuentas registradas).
+
+
+def admin_reset_password(user_id: int, new_password: str) -> None:
+    if len(new_password or "") < 6:
+        raise ValueError("La contraseña debe tener al menos 6 caracteres")
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+            raise ValueError("Ese usuario no existe")
+        conn.execute(
+            "UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?",
+            (_hash_password(new_password), user_id),
+        )
+        # Cerrar sus sesiones: una contraseña nueva invalida la antigua.
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+
+def set_admin(user_id: int, admin_flag: bool) -> None:
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+            raise ValueError("Ese usuario no existe")
+        if not admin_flag:
+            admins = conn.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1").fetchone()["c"]
+            row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+            if admins <= 1 and row["is_admin"]:
+                raise ValueError("No puedes quitarte el único admin que queda")
+        conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if admin_flag else 0, user_id))
+
+
+def list_accounts() -> list[dict]:
+    """Cuentas reales (con contraseña, excluye el Agente IA), para el panel de admin."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT u.*, a.balance, a.net_contributions FROM users u
+               LEFT JOIN account a ON a.user_id = u.id
+               WHERE u.password_hash IS NOT NULL
+               ORDER BY u.created_at"""
+        ).fetchall()
+        out = []
+        for r in rows:
+            r = dict(r)
+            trades = conn.execute(
+                "SELECT COUNT(*) AS c, MAX(ts) AS last_ts FROM trades WHERE user_id = ?", (r["id"],)
+            ).fetchone()
+            out.append({
+                "id": r["id"], "name": r["name"], "email": r["email"], "color": r["color"],
+                "isAdmin": bool(r["is_admin"]), "createdAt": r["created_at"],
+                "balance": r["balance"], "netContributions": r["net_contributions"],
+                "tradeCount": trades["c"], "lastTradeAt": trades["last_ts"],
+                "resetRequestedAt": r["reset_requested_at"],
+            })
+        return out

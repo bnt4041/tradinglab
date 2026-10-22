@@ -15,6 +15,7 @@ import UserMenu from "./components/UserMenu";
 import ProfileModal from "./components/ProfileModal";
 import AuthScreen from "./components/AuthScreen";
 import GroupsModal from "./components/GroupsModal";
+import AdminPanel from "./components/AdminPanel";
 import CurrencySelector from "./components/CurrencySelector";
 import ChatAssistant from "./components/ChatAssistant";
 import SettingsModal from "./components/SettingsModal";
@@ -42,6 +43,7 @@ export default function App() {
   const [basketOpen, setBasketOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
 
   // Plegado de cards del dashboard (persistido en localStorage)
   const [collapsed, setCollapsed] = useState(() => {
@@ -257,6 +259,7 @@ export default function App() {
             currentUser={currentUser}
             onOpenProfile={() => setProfileOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
+            onOpenAdmin={() => setAdminOpen(true)}
             onLogout={logout}
           />
         </div>
@@ -371,6 +374,13 @@ export default function App() {
         <GroupsModal
           currentUserId={currentUserId}
           onClose={() => setGroupsOpen(false)}
+          onToast={addToast}
+        />
+      )}
+      {adminOpen && currentUser?.isAdmin && (
+        <AdminPanel
+          currentUserId={currentUserId}
+          onClose={() => setAdminOpen(false)}
           onToast={addToast}
         />
       )}

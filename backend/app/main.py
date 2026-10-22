@@ -38,6 +38,12 @@ def get_user_id(request: Request) -> int:
     return uid
 
 
+def require_admin(user_id: int = Depends(get_user_id)) -> int:
+    if not auth.is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Solo el admin puede hacer esto")
+    return user_id
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self.active: dict[WebSocket, int | None] = {}
@@ -214,6 +220,18 @@ class ChallengeCreateRequest(BaseModel):
     includeBot: bool = False
 
 
+class ResetRequestRequest(BaseModel):
+    email: str
+
+
+class AdminResetPasswordRequest(BaseModel):
+    newPassword: str
+
+
+class AdminSetAdminRequest(BaseModel):
+    isAdmin: bool
+
+
 class CashRequest(BaseModel):
     amount: float
 
@@ -257,7 +275,7 @@ def _user_public(user_id: int) -> dict | None:
     u = users.get_user(user_id)
     if not u:
         return None
-    return {"id": u["id"], "name": u["name"], "color": u["color"]}
+    return {"id": u["id"], "name": u["name"], "color": u["color"], "isAdmin": bool(u["is_admin"])}
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -302,6 +320,37 @@ async def logout(request: Request, response: Response):
 @app.get("/api/auth/me")
 async def auth_me(user_id: int = Depends(get_user_id)):
     return {"user": _user_public(user_id)}
+
+
+@app.post("/api/auth/request-reset")
+async def request_password_reset(req: ResetRequestRequest):
+    auth.request_password_reset(req.email)
+    # Siempre "ok", exista o no esa cuenta: no revelamos qué emails están registrados.
+    return {"ok": True}
+
+
+# ---------------- Administración ----------------
+@app.get("/api/admin/users")
+async def admin_list_users(admin_id: int = Depends(require_admin)):
+    return auth.list_accounts()
+
+
+@app.post("/api/admin/users/{target_id}/reset-password")
+async def admin_reset_password(target_id: int, req: AdminResetPasswordRequest, admin_id: int = Depends(require_admin)):
+    try:
+        auth.admin_reset_password(target_id, req.newPassword)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{target_id}/admin")
+async def admin_set_admin(target_id: int, req: AdminSetAdminRequest, admin_id: int = Depends(require_admin)):
+    try:
+        auth.set_admin(target_id, req.isAdmin)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
 
 
 # ---------------- Grupos y retos ----------------
@@ -702,8 +751,7 @@ async def assistant_chat(req: ChatRequest):
 
 
 # ---------------- Ajustes de IA ----------------
-@app.get("/api/settings")
-async def get_settings():
+def _settings_payload() -> dict:
     return {
         "aiProvider": database.get_setting("ai_provider", "local"),
         "openrouterModel": database.get_setting("openrouter_model", ""),
@@ -714,8 +762,13 @@ async def get_settings():
     }
 
 
+@app.get("/api/settings")
+async def get_settings(user_id: int = Depends(get_user_id)):
+    return _settings_payload()
+
+
 @app.post("/api/settings")
-async def update_settings(req: SettingsRequest):
+async def update_settings(req: SettingsRequest, admin_id: int = Depends(require_admin)):
     if req.aiProvider in ("local", "openrouter", "deepseek"):
         database.set_setting("ai_provider", req.aiProvider)
     if req.openrouterModel is not None:
@@ -726,7 +779,7 @@ async def update_settings(req: SettingsRequest):
         database.set_setting("deepseek_model", req.deepseekModel.strip())
     if req.deepseekKey is not None and req.deepseekKey.strip():
         database.set_setting("deepseek_key", req.deepseekKey.strip())
-    return await get_settings()
+    return _settings_payload()
 
 
 @app.get("/api/openrouter/models")
@@ -735,12 +788,12 @@ async def openrouter_models():
 
 
 @app.post("/api/ai/test")
-async def ai_test():
+async def ai_test(admin_id: int = Depends(require_admin)):
     return await assistant.test()
 
 
 @app.get("/api/ai/log")
-async def ai_log():
+async def ai_log(admin_id: int = Depends(require_admin)):
     return assistant.get_log(50)
 
 

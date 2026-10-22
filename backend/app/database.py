@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at REAL NOT NULL,
     is_bot INTEGER NOT NULL DEFAULT 0,
     email TEXT UNIQUE,
-    password_hash TEXT
+    password_hash TEXT,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    reset_requested_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -274,6 +276,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
         if "password_hash" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "is_admin" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "reset_requested_at" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN reset_requested_at REAL")
 
         # Usuario por defecto si no hay ninguno
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
