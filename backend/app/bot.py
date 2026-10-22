@@ -115,7 +115,9 @@ async def run_cycle(prices: dict[str, float]) -> dict:
     # Cuenta libre (benchmark, sin límite de movimientos)
     free_actions = _run_profile(bot_id, FREE_PROFILE, signals, prices, trades_left=None)
 
-    # Un perfil por cada reto activo en que compite, respetando su cupo
+    # Un perfil por cada reto activo en que compite, respetando su cupo y los
+    # mercados permitidos del reto (el bot solo opera cripto, así que si el reto
+    # excluye la cripto simplemente no hace nada en él).
     now = time.time()
     for ch in challenges.my_active_challenges(bot_id):
         if ch["end_at"] <= now:
@@ -125,7 +127,10 @@ async def run_cycle(prices: dict[str, float]) -> dict:
         left = max(0, ch["max_trades"] - used)
         if left <= 0:
             continue
-        _run_profile(bot_id, profile, signals, prices, trades_left=left)
+        ch_signals = {s: v for s, v in signals.items() if challenges.market_allowed(ch, s)}
+        if not ch_signals:
+            continue
+        _run_profile(bot_id, profile, ch_signals, prices, trades_left=left)
 
     database.set_setting("bot_last_run", str(time.time()))
     summary = "No hizo cambios hoy." if not free_actions else "Operaciones de hoy: " + ", ".join(free_actions) + "."

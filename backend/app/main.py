@@ -231,6 +231,11 @@ class ChallengeCreateRequest(BaseModel):
     maxTrades: int
     includeBot: bool = False
     initialBalance: float = 10000
+    isOpen: bool = False
+    entryFee: float = 0
+    prize: float = 0
+    maxParticipants: int = 0
+    markets: list[str] = []
 
 
 class ResetRequestRequest(BaseModel):
@@ -355,6 +360,7 @@ async def my_profiles(user_id: int = Depends(get_user_id)):
             "finished": ch["end_at"] <= now,
             "maxTrades": ch["max_trades"],
             "tradesUsed": challenges.trades_used(ch["id"], user_id),
+            "markets": challenges.allowed_markets(ch),
         })
     return out
 
@@ -464,12 +470,35 @@ async def _equity_now(uid: int, profile: str = database.FREE_PROFILE) -> float:
     return portfolio.portfolio_summary(uid, prices, profile=profile)["equity"]
 
 
+def _create_challenge_common(req: ChallengeCreateRequest, user_id: int, group_id: int | None, is_open: bool) -> dict:
+    return challenges.create_challenge(
+        user_id, req.name, req.days, req.maxTrades, req.includeBot, req.initialBalance,
+        group_id=group_id, is_open=is_open, entry_fee=req.entryFee, prize=req.prize,
+        max_participants=req.maxParticipants, markets=req.markets,
+    )
+
+
 @app.post("/api/groups/{group_id}/challenges")
 async def create_challenge(group_id: int, req: ChallengeCreateRequest, user_id: int = Depends(get_user_id)):
     try:
-        return challenges.create_challenge(
-            group_id, user_id, req.name, req.days, req.maxTrades, req.includeBot, req.initialBalance,
-        )
+        # Desde un grupo se puede crear un reto del grupo o uno abierto (req.isOpen).
+        return _create_challenge_common(req, user_id, None if req.isOpen else group_id, req.isOpen)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/challenges/open")
+async def list_open_challenges(user_id: int = Depends(get_user_id)):
+    rows = challenges.list_open_challenges()
+    for c in rows:
+        c["amIn"] = challenges.is_participant(c["id"], user_id)
+    return rows
+
+
+@app.post("/api/challenges/open")
+async def create_open_challenge(req: ChallengeCreateRequest, user_id: int = Depends(get_user_id)):
+    try:
+        return _create_challenge_common(req, user_id, None, True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -487,7 +516,7 @@ async def challenge_detail(challenge_id: int, user_id: int = Depends(get_user_id
     challenge = challenges.get_challenge(challenge_id)
     if not challenge:
         raise HTTPException(status_code=404, detail="Reto no encontrado")
-    if not groups.is_member(challenge["group_id"], user_id):
+    if not challenge["is_open"] and not groups.is_member(challenge["group_id"], user_id):
         raise HTTPException(status_code=404, detail="Reto no encontrado")
 
     profile = database.challenge_profile(challenge_id)
@@ -502,12 +531,14 @@ async def challenge_detail(challenge_id: int, user_id: int = Depends(get_user_id
         r["rank"] = i + 1
 
     now = time.time()
+    challenge["markets_list"] = challenges.allowed_markets(challenge)
     return {
         "challenge": challenge,
         "ranking": rows,
         "daysLeft": max(0, round((challenge["end_at"] - now) / 86400, 1)),
         "finished": challenge["end_at"] <= now,
         "myTradesUsed": challenges.trades_used(challenge_id, user_id),
+        "participantCount": challenges.human_participant_count(challenge_id),
     }
 
 
@@ -724,7 +755,7 @@ async def trade(req: TradeRequest, user_id: int = Depends(get_user_id), profile:
     ai_prob = peek["prob"] if peek else None
 
     try:
-        challenges.check_trade_allowed(user_id, profile)
+        challenges.check_trade_allowed(user_id, profile, symbol)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -910,7 +941,7 @@ async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)
     for it in ordered:
         sym = it.symbol
         try:
-            challenges.check_trade_allowed(user_id, profile)
+            challenges.check_trade_allowed(user_id, profile, sym)
             price = _latest_prices.get(sym) or (await market.get_ticker(sym))["price"]
             quantity = it.quantity
             if quantity is None and it.quoteAmount is not None:

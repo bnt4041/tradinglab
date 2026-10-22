@@ -9,7 +9,7 @@ uno con su propio cupo), cosa que antes no era posible.
 """
 import time
 
-from . import database, groups, portfolio, users
+from . import config, database, groups, portfolio, users
 from .database import challenge_profile, get_conn
 
 MIN_INITIAL_BALANCE = 100
@@ -25,9 +25,33 @@ def challenge_id_from_profile(profile: str) -> int | None:
         return None
 
 
+def allowed_markets(challenge: dict) -> list[str]:
+    """Categorías de mercado permitidas en el reto. '' = todas."""
+    raw = (challenge.get("markets") or "").strip()
+    if not raw:
+        return list(config.CATEGORIES)
+    return [c for c in raw.split(",") if c in config.CATEGORIES]
+
+
+def market_allowed(challenge: dict, symbol: str) -> bool:
+    inst = config.instrument(symbol) or {}
+    return inst.get("category", "cripto") in allowed_markets(challenge)
+
+
+def human_participant_count(challenge_id: int) -> int:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT COUNT(*) AS c FROM challenge_participants cp
+               JOIN users u ON u.id = cp.user_id
+               WHERE cp.challenge_id = ? AND u.is_bot = 0""",
+            (challenge_id,),
+        ).fetchone()["c"]
+
+
 def create_challenge(
-    group_id: int, created_by: int, name: str, days: int, max_trades: int, include_bot: bool,
-    initial_balance: float,
+    created_by: int, name: str, days: int, max_trades: int, include_bot: bool,
+    initial_balance: float, *, group_id: int | None = None, is_open: bool = False,
+    entry_fee: float = 0, prize: float = 0, max_participants: int = 0, markets: list[str] | None = None,
 ) -> dict:
     name = (name or "").strip()
     if not name or len(name) > 60:
@@ -38,23 +62,38 @@ def create_challenge(
         raise ValueError("El número de movimientos debe ser entre 1 y 1000")
     if not (MIN_INITIAL_BALANCE <= initial_balance <= MAX_INITIAL_BALANCE):
         raise ValueError(f"El importe inicial debe estar entre {MIN_INITIAL_BALANCE:,.0f} y {MAX_INITIAL_BALANCE:,.0f} USDT")
-    if not groups.is_member(group_id, created_by):
-        raise ValueError("No perteneces a este grupo")
+    if entry_fee < 0 or prize < 0:
+        raise ValueError("La cuota y el premio no pueden ser negativos")
+    if max_participants < 0 or max_participants > 10000:
+        raise ValueError("El aforo no es válido")
+
+    mk = [c for c in (markets or []) if c in config.CATEGORIES]
+    if markets and not mk:
+        raise ValueError("Elige al menos un mercado válido")
+    markets_str = "" if (not mk or len(mk) == len(config.CATEGORIES)) else ",".join(mk)
+
+    if is_open:
+        group_id = None  # un reto abierto no pertenece a ningún grupo
+    else:
+        if group_id is None or not groups.is_member(group_id, created_by):
+            raise ValueError("No perteneces a este grupo")
 
     now = time.time()
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO challenges
-               (group_id, name, days, max_trades, include_bot, initial_balance, start_at, end_at, created_by, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (group_id, name, days, max_trades, include_bot, initial_balance, is_open, entry_fee, prize,
+                max_participants, markets, start_at, end_at, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (group_id, name, days, max_trades, 1 if include_bot else 0, initial_balance,
+             1 if is_open else 0, entry_fee, prize, max_participants, markets_str,
              now, now + days * 86400, created_by, now),
         )
         challenge_id = cur.lastrowid
         row = dict(conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone())
 
-    # El creador se apunta a su propio reto. Ya no hay límite de "un reto a la
-    # vez": cada reto es un perfil aparte con su propio cupo de operaciones.
+    # El creador se apunta a su propio reto. Cada reto es un perfil aparte con
+    # su propio cupo de operaciones (puedes estar en varios a la vez).
     _join_raw(challenge_id, created_by, initial_balance)
     if include_bot:
         bot = users.ensure_bot()
@@ -107,10 +146,33 @@ def join_challenge(challenge_id: int, user_id: int) -> dict:
         raise ValueError("El reto no existe")
     if challenge["end_at"] <= time.time():
         raise ValueError("Este reto ya ha terminado")
-    if not groups.is_member(challenge["group_id"], user_id):
+    if not challenge["is_open"] and not groups.is_member(challenge["group_id"], user_id):
         raise ValueError("No perteneces al grupo de este reto")
+    if not is_participant(challenge_id, user_id):
+        cap = challenge["max_participants"]
+        if cap and human_participant_count(challenge_id) >= cap:
+            raise ValueError(f"El reto está completo (aforo de {cap} personas)")
     _join_raw(challenge_id, user_id, challenge["initial_balance"])
     return challenge
+
+
+def list_open_challenges(limit: int = 50) -> list[dict]:
+    """Retos abiertos (cualquiera se une). Los que no han terminado, primero."""
+    now = time.time()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM challenges WHERE is_open = 1 ORDER BY (end_at > ?) DESC, created_at DESC LIMIT ?",
+            (now, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            c = dict(r)
+            c["participantCount"] = conn.execute(
+                "SELECT COUNT(*) AS n FROM challenge_participants WHERE challenge_id = ?", (c["id"],)
+            ).fetchone()["n"]
+            c["finished"] = c["end_at"] <= now
+            out.append(c)
+        return out
 
 
 def my_active_challenges(user_id: int) -> list[dict]:
@@ -129,9 +191,9 @@ def trades_used(challenge_id: int, user_id: int) -> int:
     return portfolio.count_trades(user_id, profile=challenge_profile(challenge_id))
 
 
-def check_trade_allowed(user_id: int, profile: str) -> None:
+def check_trade_allowed(user_id: int, profile: str, symbol: str | None = None) -> None:
     """Valida un intento de operar en el perfil dado. Solo los perfiles de reto
-    tienen restricciones (reto terminado o cupo de movimientos agotado)."""
+    tienen restricciones (reto terminado, cupo agotado o mercado no permitido)."""
     cid = challenge_id_from_profile(profile)
     if cid is None:
         return
@@ -140,6 +202,9 @@ def check_trade_allowed(user_id: int, profile: str) -> None:
         return
     if challenge["end_at"] <= time.time():
         raise ValueError(f"El reto «{challenge['name']}» ya ha terminado")
+    if symbol is not None and not market_allowed(challenge, symbol):
+        labels = ", ".join(config.CATEGORY_LABELS.get(c, c) for c in allowed_markets(challenge))
+        raise ValueError(f"En este reto solo puedes operar: {labels}")
     used = trades_used(cid, user_id)
     if used >= challenge["max_trades"]:
         raise ValueError(

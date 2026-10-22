@@ -99,6 +99,9 @@ export const api = {
   groupDetail: (id) => request(`/groups/${id}`),
   createChallenge: (groupId, payload) =>
     request(`/groups/${groupId}/challenges`, { method: "POST", body: JSON.stringify(payload) }),
+  openChallenges: () => request("/challenges/open"),
+  createOpenChallenge: (payload) =>
+    request("/challenges/open", { method: "POST", body: JSON.stringify(payload) }),
   joinChallenge: (id) => request(`/challenges/${id}/join`, { method: "POST" }),
   challengeDetail: (id) => request(`/challenges/${id}`),
 

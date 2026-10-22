@@ -109,12 +109,17 @@ CREATE TABLE IF NOT EXISTS group_members (
 
 CREATE TABLE IF NOT EXISTS challenges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER NOT NULL,
+    group_id INTEGER,                      -- NULL en los retos abiertos (sin grupo)
     name TEXT NOT NULL,
     days INTEGER NOT NULL,
     max_trades INTEGER NOT NULL,
     include_bot INTEGER NOT NULL DEFAULT 0,
     initial_balance REAL NOT NULL DEFAULT 10000,
+    is_open INTEGER NOT NULL DEFAULT 0,        -- 1 = cualquiera puede unirse
+    entry_fee REAL NOT NULL DEFAULT 0,         -- cuota ficticia (informativa)
+    prize REAL NOT NULL DEFAULT 0,             -- premio ficticio (informativo)
+    max_participants INTEGER NOT NULL DEFAULT 0, -- 0 = sin límite (cuenta personas, no el bot)
+    markets TEXT NOT NULL DEFAULT '',          -- categorías permitidas, coma-separadas; '' = todas
     start_at REAL NOT NULL,
     end_at REAL NOT NULL,
     created_by INTEGER NOT NULL,
@@ -329,6 +334,44 @@ def _migrate_add_profiles(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snap_user_ts ON equity_snapshots(user_id, profile, ts)")
 
 
+def _migrate_challenge_props(conn) -> None:
+    """Añade a los retos: tipo abierto/grupo, cuota, premio, aforo y mercados.
+
+    Se reconstruye la tabla porque `group_id` pasa de NOT NULL a admitir NULL
+    (retos abiertos sin grupo), y eso ALTER no lo permite."""
+    if not _table_exists(conn, "challenges") or "is_open" in _columns(conn, "challenges"):
+        return
+    conn.execute("ALTER TABLE challenges RENAME TO challenges_old")
+    conn.execute(
+        """CREATE TABLE challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER,
+            name TEXT NOT NULL,
+            days INTEGER NOT NULL,
+            max_trades INTEGER NOT NULL,
+            include_bot INTEGER NOT NULL DEFAULT 0,
+            initial_balance REAL NOT NULL DEFAULT 10000,
+            is_open INTEGER NOT NULL DEFAULT 0,
+            entry_fee REAL NOT NULL DEFAULT 0,
+            prize REAL NOT NULL DEFAULT 0,
+            max_participants INTEGER NOT NULL DEFAULT 0,
+            markets TEXT NOT NULL DEFAULT '',
+            start_at REAL NOT NULL,
+            end_at REAL NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO challenges (id, group_id, name, days, max_trades, include_bot, initial_balance, "
+        "start_at, end_at, created_by, created_at) "
+        "SELECT id, group_id, name, days, max_trades, include_bot, initial_balance, "
+        "start_at, end_at, created_by, created_at FROM challenges_old"
+    )
+    conn.execute("DROP TABLE challenges_old")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_challenges_group ON challenges(group_id)")
+
+
 def init_db() -> None:
     with get_conn() as conn:
         needs_migration = _table_exists(conn, "account") and "user_id" not in _columns(
@@ -342,6 +385,7 @@ def init_db() -> None:
             _migrate_v1_to_v2(conn)
 
         _migrate_add_profiles(conn)
+        _migrate_challenge_props(conn)
 
         # Columnas para registrar la señal de la IA en el momento de operar
         trade_cols = _columns(conn, "trades")

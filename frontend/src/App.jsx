@@ -232,6 +232,23 @@ export default function App() {
   const currentUser = authUser;
   const activeProfileObj = profiles.find((p) => p.key === activeProfile);
   const isFreeProfile = !activeProfileObj || activeProfileObj.kind === "free";
+  // En un reto con mercados restringidos, la watchlist solo muestra esos mercados.
+  const challengeMarkets = activeProfileObj?.kind === "challenge" ? activeProfileObj.markets : null;
+  const marketRestricted = challengeMarkets && challengeMarkets.length > 0 && challengeMarkets.length < 4;
+  const visibleTickers = marketRestricted
+    ? Object.fromEntries(
+        Object.entries(tickers).filter(([sym, t]) => challengeMarkets.includes(t?.category || instrumentMeta[sym]?.category))
+      )
+    : tickers;
+
+  // Al entrar en un reto restringido, si el activo seleccionado no está permitido, salta al primero disponible.
+  useEffect(() => {
+    if (marketRestricted && visibleTickers[selected] === undefined) {
+      const first = Object.keys(visibleTickers)[0];
+      if (first) setSelected(first);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProfile, marketRestricted]);
 
   // Crédito que generan las ventas ya puestas en la cesta (para financiar compras)
   const FEE = 0.001;
@@ -325,7 +342,7 @@ export default function App() {
         <div className="flex flex-col gap-3 xl:w-[280px] xl:shrink-0">
           <div className={collapsed.watchlist ? "" : "h-[440px] min-h-0 xl:flex-1"}>
             <Watchlist
-              tickers={tickers}
+              tickers={visibleTickers}
               selected={selected}
               onSelect={setSelected}
               collapsed={!!collapsed.watchlist}
