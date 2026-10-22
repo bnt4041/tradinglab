@@ -2,20 +2,16 @@
 // En Docker nginx hace de proxy, así que usamos rutas relativas por defecto.
 const BASE = import.meta.env.VITE_API_BASE || "";
 
-// --- Usuario actual (perfil) ---
-let _userId = Number(localStorage.getItem("tradelab_user")) || null;
-export function getUserId() {
-  return _userId;
-}
-export function setUserId(id) {
-  _userId = id ? Number(id) : null;
-  if (_userId) localStorage.setItem("tradelab_user", String(_userId));
-  else localStorage.removeItem("tradelab_user");
-}
+// --- Sesión ---
+// La identidad ya no la decide el navegador (antes: localStorage + header
+// X-User-Id, que cualquiera podía falsificar): ahora es una cookie de sesión
+// httpOnly que pone el backend tras /api/auth/login o /api/auth/register.
+// fetch() envía cookies same-origin por defecto, así que no hace falta nada
+// especial aquí salvo no mandar ya X-User-Id.
+export class AuthError extends Error {}
 
 async function request(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (_userId) headers["X-User-Id"] = String(_userId);
   const res = await fetch(`${BASE}/api${path}`, { ...options, headers });
   if (!res.ok) {
     let detail = `Error ${res.status}`;
@@ -23,6 +19,7 @@ async function request(path, options = {}) {
       const body = await res.json();
       detail = body.detail || detail;
     } catch (_) {}
+    if (res.status === 401) throw new AuthError(detail);
     throw new Error(detail);
   }
   return res.json();
@@ -52,10 +49,23 @@ export const api = {
   basketAdvice: (items) => request("/basket/advice", { method: "POST", body: JSON.stringify({ items }) }),
   basketExecute: (items) => request("/basket/execute", { method: "POST", body: JSON.stringify({ items }) }),
 
-  // Usuarios
-  users: () => request("/users"),
-  createUser: (name) => request("/users", { method: "POST", body: JSON.stringify({ name }) }),
-  deleteUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
+  // Autenticación
+  register: (name, email, password) =>
+    request("/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) }),
+  login: (email, password) =>
+    request("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => request("/auth/logout", { method: "POST" }),
+  me: () => request("/auth/me"),
+
+  // Grupos y retos
+  groups: () => request("/groups"),
+  createGroup: (name) => request("/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  joinGroup: (code) => request("/groups/join", { method: "POST", body: JSON.stringify({ code }) }),
+  groupDetail: (id) => request(`/groups/${id}`),
+  createChallenge: (groupId, payload) =>
+    request(`/groups/${groupId}/challenges`, { method: "POST", body: JSON.stringify(payload) }),
+  joinChallenge: (id) => request(`/challenges/${id}/join`, { method: "POST" }),
+  challengeDetail: (id) => request(`/challenges/${id}`),
 
   // Cartera
   portfolio: () => request("/portfolio"),
@@ -89,8 +99,6 @@ export function connectWS(onMessage) {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     url = `${proto}://${window.location.host}/ws`;
   }
-  if (_userId) url += `?userId=${_userId}`;
-
   let ws;
   let closed = false;
   let retry;

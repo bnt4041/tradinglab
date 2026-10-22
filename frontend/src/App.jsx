@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CandlestickChart, GraduationCap, BadgeDollarSign, ShoppingCart, Settings } from "lucide-react";
-import { api, connectWS, getUserId, setUserId, setInstrumentMeta, coinName, instrumentMeta } from "./api";
+import { CandlestickChart, GraduationCap, BadgeDollarSign, ShoppingCart, Settings, Trophy } from "lucide-react";
+import { api, AuthError, connectWS, setInstrumentMeta, coinName, instrumentMeta } from "./api";
 import Watchlist from "./components/Watchlist";
 import PriceChart from "./components/PriceChart";
 import AIPanel from "./components/AIPanel";
@@ -13,6 +13,8 @@ import Onboarding from "./components/Onboarding";
 import Toasts from "./components/Toasts";
 import UserMenu from "./components/UserMenu";
 import ProfileModal from "./components/ProfileModal";
+import AuthScreen from "./components/AuthScreen";
+import GroupsModal from "./components/GroupsModal";
 import CurrencySelector from "./components/CurrencySelector";
 import ChatAssistant from "./components/ChatAssistant";
 import SettingsModal from "./components/SettingsModal";
@@ -20,6 +22,7 @@ import BasketModal from "./components/BasketModal";
 import MarketTrendsCard from "./components/MarketTrendsCard";
 
 export default function App() {
+  const [authUser, setAuthUser] = useState(undefined); // undefined=cargando, null=sin sesión, objeto=autenticado
   const [tickers, setTickers] = useState({});
   const [selected, setSelected] = useState("BTCUSDT");
   const [interval, setIntervalVal] = useState("1h");
@@ -34,12 +37,11 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [toasts, setToasts] = useState([]);
 
-  const [usersList, setUsersList] = useState([]);
-  const [currentUserId, setCurrentUserId] = useState(null);
   const [advisor, setAdvisor] = useState(null);
   const [basket, setBasket] = useState([]);
   const [basketOpen, setBasketOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
 
   // Plegado de cards del dashboard (persistido en localStorage)
   const [collapsed, setCollapsed] = useState(() => {
@@ -88,7 +90,7 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // --- Bootstrap: usuarios + mercado (una vez) ---
+  // --- Bootstrap: sesión + mercado (una vez) ---
   useEffect(() => {
     if (!localStorage.getItem("tradelab_onboarded")) setShowOnboarding(true);
     if ("Notification" in window && Notification.permission === "default") {
@@ -96,17 +98,12 @@ export default function App() {
     }
 
     api
-      .users()
-      .then((list) => {
-        setUsersList(list);
-        let uid = getUserId();
-        if (!uid || !list.some((u) => u.id === uid)) {
-          uid = list[0]?.id;
-        }
-        setUserId(uid);
-        setCurrentUserId(uid);
-      })
-      .catch((e) => addToast("No se pudieron cargar los perfiles: " + e.message, "danger"));
+      .me()
+      .then(({ user }) => setAuthUser(user))
+      .catch((e) => {
+        if (e instanceof AuthError) setAuthUser(null);
+        else addToast("No se pudo comprobar la sesión: " + e.message, "danger");
+      });
 
     api
       .symbols()
@@ -120,7 +117,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Datos por usuario + WebSocket (al cambiar de usuario) ---
+  const currentUserId = authUser?.id ?? null;
+
+  // --- Datos del usuario + WebSocket (al autenticarse) ---
   useEffect(() => {
     if (!currentUserId) return;
     refreshPortfolio();
@@ -159,39 +158,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUserId]);
 
-  // --- Gestión de perfiles ---
-  const switchUser = (id) => {
-    if (id === currentUserId) return;
-    setUserId(id);
-    setConnected(false);
+  // --- Sesión ---
+  const logout = async () => {
+    await api.logout().catch(() => {});
+    setAuthUser(null);
     setPortfolio(null);
-    setCurrentUserId(id);
-    addToast(`Perfil cambiado a ${usersList.find((u) => u.id === id)?.name || ""}`, "info");
-  };
-
-  const createUser = async (name) => {
-    try {
-      const u = await api.createUser(name);
-      const list = await api.users();
-      setUsersList(list);
-      switchUser(u.id);
-      addToast(`Perfil "${u.name}" creado`, "success");
-    } catch (e) {
-      addToast(e.message, "danger");
-    }
-  };
-
-  const deleteUser = async (id) => {
-    await api.deleteUser(id);
-    const list = await api.users();
-    setUsersList(list);
-    setProfileOpen(false);
-    if (id === currentUserId) {
-      const next = list[0]?.id;
-      setUserId(next);
-      setCurrentUserId(next);
-    }
-    addToast("Perfil eliminado", "info");
+    setConnected(false);
   };
 
   const closeOnboarding = () => {
@@ -219,7 +191,7 @@ export default function App() {
   const ticker = tickers[selected];
   const livePrice = ticker?.price;
   const holding = portfolio?.holdings?.find((h) => h.symbol === selected);
-  const currentUser = usersList.find((u) => u.id === currentUserId);
+  const currentUser = authUser;
 
   // Crédito que generan las ventas ya puestas en la cesta (para financiar compras)
   const FEE = 0.001;
@@ -232,6 +204,13 @@ export default function App() {
     0
   );
   const basketAvailable = (portfolio?.balance || 0) + basketSellCredit - basketBuyCost;
+
+  if (authUser === undefined) {
+    return <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">Cargando…</div>;
+  }
+  if (authUser === null) {
+    return <AuthScreen onAuthenticated={setAuthUser} onToast={addToast} />;
+  }
 
   return (
     <div className="mx-auto min-h-screen max-w-[1600px] px-3 py-3 sm:px-5 sm:py-4">
@@ -268,16 +247,17 @@ export default function App() {
             )}
           </button>
           <NotificationCenter items={notifications} unread={unread} onOpen={openNotifications} onClear={clearNotifs} />
+          <button onClick={() => setGroupsOpen(true)} className="icon-btn h-10 w-10" title="Grupos y retos">
+            <Trophy className="h-[18px] w-[18px]" />
+          </button>
           <button onClick={() => setLearnOpen(true)} className="btn-primary !px-3 !py-2 text-sm">
             <GraduationCap className="h-4 w-4" /> <span className="hidden sm:inline">Aprender</span>
           </button>
           <UserMenu
-            users={usersList}
             currentUser={currentUser}
-            onSwitch={switchUser}
-            onCreate={createUser}
             onOpenProfile={() => setProfileOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
+            onLogout={logout}
           />
         </div>
       </header>
@@ -382,10 +362,15 @@ export default function App() {
         <ProfileModal
           user={currentUser}
           portfolio={portfolio}
-          usersCount={usersList.length}
           onClose={() => setProfileOpen(false)}
           onChanged={refreshPortfolio}
-          onDeleteUser={deleteUser}
+          onToast={addToast}
+        />
+      )}
+      {groupsOpen && (
+        <GroupsModal
+          currentUserId={currentUserId}
+          onClose={() => setGroupsOpen(false)}
           onToast={addToast}
         />
       )}

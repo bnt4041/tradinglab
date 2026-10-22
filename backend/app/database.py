@@ -62,7 +62,54 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT UNIQUE NOT NULL,
     color TEXT NOT NULL,
     created_at REAL NOT NULL,
-    is_bot INTEGER NOT NULL DEFAULT 0
+    is_bot INTEGER NOT NULL DEFAULT 0,
+    email TEXT UNIQUE,
+    password_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    code TEXT UNIQUE NOT NULL,
+    owner_id INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    joined_at REAL NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    max_trades INTEGER NOT NULL,
+    include_bot INTEGER NOT NULL DEFAULT 0,
+    start_at REAL NOT NULL,
+    end_at REAL NOT NULL,
+    created_by INTEGER NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_challenges_group ON challenges(group_id);
+
+CREATE TABLE IF NOT EXISTS challenge_participants (
+    challenge_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    joined_at REAL NOT NULL,
+    start_equity REAL NOT NULL,
+    PRIMARY KEY (challenge_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS account (
@@ -222,6 +269,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE trades ADD COLUMN ai_prob REAL")
         if "is_bot" not in _columns(conn, "users"):
             conn.execute("ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0")
+        user_cols = _columns(conn, "users")
+        if "email" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        if "password_hash" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
 
         # Usuario por defecto si no hay ninguno
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]

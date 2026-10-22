@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { X, ArrowDownToLine, ArrowUpFromLine, RotateCcw, Trash2 } from "lucide-react";
+import { X, ArrowDownToLine, ArrowUpFromLine, RotateCcw } from "lucide-react";
 import { api, fmt } from "../api";
 import { useCurrency } from "../currency";
 
-export default function ProfileModal({ user, portfolio, usersCount, onClose, onChanged, onDeleteUser, onToast }) {
+export default function ProfileModal({ user, portfolio, onClose, onChanged, onToast }) {
   const { money, toBase, symbol } = useCurrency();
   const [mode, setMode] = useState("deposit");
   const [amount, setAmount] = useState("");
@@ -28,11 +28,6 @@ export default function ProfileModal({ user, portfolio, usersCount, onClose, onC
     if (!window.confirm("¿Reiniciar esta cuenta demo? Se borrarán posiciones e historial y el saldo volverá al inicial.")) return;
     try { await api.resetAccount(); onToast?.("Cuenta reiniciada", "info"); onChanged?.(); loadMovements(); }
     catch (e) { onToast?.(e.message, "danger"); }
-  };
-
-  const del = async () => {
-    if (!window.confirm(`¿Eliminar el perfil "${user.name}"? Esta acción no se puede deshacer.`)) return;
-    try { await onDeleteUser(user.id); } catch (e) { onToast?.(e.message, "danger"); }
   };
 
   const up = (portfolio?.totalPnl ?? 0) >= 0;
@@ -127,11 +122,6 @@ export default function ProfileModal({ user, portfolio, usersCount, onClose, onC
             <button onClick={reset} className="btn-ghost flex-1 text-xs">
               <RotateCcw className="h-4 w-4" /> Reiniciar cuenta
             </button>
-            {usersCount > 1 && (
-              <button onClick={del} className="btn flex-1 bg-down-soft text-xs text-down hover:brightness-95">
-                <Trash2 className="h-4 w-4" /> Eliminar perfil
-              </button>
-            )}
           </div>
         </div>
       </div>

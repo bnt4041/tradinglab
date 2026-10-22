@@ -1,33 +1,41 @@
 """API FastAPI del emulador de trading (multi-activo + IA local + asesor)."""
 import asyncio
 import contextlib
+import os
 import time
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import advisor, alerts, assistant, basket, bot, coach, config, database, external, market, ml, portfolio, trends, users
+from . import advisor, alerts, assistant, auth, basket, bot, challenges, coach, config, database, external, groups, market, ml, portfolio, trends, users
 
 app = FastAPI(title="Emulador de Trading", version="3.0.0")
 
+# Mismo origen siempre (nginx hace de proxy delante del backend), así que no
+# hace falta "*" — y con cookies de sesión, allow_credentials exige un origen
+# explícito en vez de "*" según el propio spec de CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=[
+        "http://localhost", "http://localhost:5173",
+        os.getenv("PUBLIC_ORIGIN", "https://tradinglab.pirueta.online"),
+    ],
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 ACTIVE_CRYPTO: list[str] = list(config.CRYPTO_IDS)
 YAHOO_IDS: list[str] = list(config.YAHOO_IDS)
 _latest_prices: dict[str, float] = {}
 
+SESSION_COOKIE = "sid"
 
-def get_user_id(x_user_id: int | None = Header(default=None)) -> int:
-    if x_user_id is not None and users.user_exists(x_user_id):
-        return x_user_id
-    all_users = users.list_users()
-    if not all_users:
-        raise HTTPException(status_code=500, detail="No hay usuarios configurados")
-    return all_users[0]["id"]
+
+def get_user_id(request: Request) -> int:
+    uid = auth.get_user_id_from_token(request.cookies.get(SESSION_COOKIE))
+    if uid is None:
+        raise HTTPException(status_code=401, detail="No has iniciado sesión")
+    return uid
 
 
 class ConnectionManager:
@@ -180,8 +188,30 @@ class AlertRequest(BaseModel):
     note: str = ""
 
 
-class UserRequest(BaseModel):
+class RegisterRequest(BaseModel):
     name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class GroupCreateRequest(BaseModel):
+    name: str
+
+
+class GroupJoinRequest(BaseModel):
+    code: str
+
+
+class ChallengeCreateRequest(BaseModel):
+    name: str
+    days: int
+    maxTrades: int
+    includeBot: bool = False
 
 
 class CashRequest(BaseModel):
@@ -202,6 +232,8 @@ class SettingsRequest(BaseModel):
     aiProvider: str | None = None
     openrouterModel: str | None = None
     openrouterKey: str | None = None
+    deepseekModel: str | None = None
+    deepseekKey: str | None = None
 
 
 class BasketItem(BaseModel):
@@ -221,31 +253,146 @@ async def health():
     return {"status": "ok", "crypto": len(ACTIVE_CRYPTO), "yahoo": len(YAHOO_IDS)}
 
 
-@app.get("/api/users")
-async def get_users():
-    return users.list_users()
+def _user_public(user_id: int) -> dict | None:
+    u = users.get_user(user_id)
+    if not u:
+        return None
+    return {"id": u["id"], "name": u["name"], "color": u["color"]}
 
 
-@app.post("/api/users")
-async def create_user(req: UserRequest):
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE, token, max_age=auth.SESSION_DAYS * 86400,
+        httponly=True, samesite="lax", secure=True, path="/",
+    )
+
+
+# ---------------- Autenticación ----------------
+@app.post("/api/auth/register")
+async def register(req: RegisterRequest, response: Response):
     try:
-        return users.create_user(req.name)
+        user = auth.register(req.name, req.email, req.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    token = auth.create_session(user["id"])
+    _set_session_cookie(response, token)
+    return {"user": _user_public(user["id"])}
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest, response: Response):
+    try:
+        user = auth.login(req.email, req.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    token = auth.create_session(user["id"])
+    _set_session_cookie(response, token)
+    return {"user": _user_public(user["id"])}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        auth.delete_session(token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+async def auth_me(user_id: int = Depends(get_user_id)):
+    return {"user": _user_public(user_id)}
+
+
+# ---------------- Grupos y retos ----------------
+@app.get("/api/groups")
+async def my_groups(user_id: int = Depends(get_user_id)):
+    return groups.list_my_groups(user_id)
+
+
+@app.post("/api/groups")
+async def create_group(req: GroupCreateRequest, user_id: int = Depends(get_user_id)):
+    try:
+        return groups.create_group(user_id, req.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.delete("/api/users/{user_id}")
-async def delete_user(user_id: int):
+@app.post("/api/groups/join")
+async def join_group(req: GroupJoinRequest, user_id: int = Depends(get_user_id)):
     try:
-        users.delete_user(user_id)
-        return {"ok": True}
+        return groups.join_group(user_id, req.code)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.get("/api/me")
-async def me(user_id: int = Depends(get_user_id)):
-    return {"user": users.get_user(user_id)}
+@app.get("/api/groups/{group_id}")
+async def group_detail(group_id: int, user_id: int = Depends(get_user_id)):
+    group = groups.get_group(group_id)
+    if not group or not groups.is_member(group_id, user_id):
+        raise HTTPException(status_code=404, detail="Grupo no encontrado")
+    return {
+        "group": group,
+        "members": groups.list_members(group_id),
+        "challenges": challenges.list_group_challenges(group_id),
+    }
+
+
+async def _equity_now(uid: int) -> float:
+    prices = await _prices_for_user(uid)
+    return portfolio.portfolio_summary(uid, prices)["equity"]
+
+
+@app.post("/api/groups/{group_id}/challenges")
+async def create_challenge(group_id: int, req: ChallengeCreateRequest, user_id: int = Depends(get_user_id)):
+    creator_equity = await _equity_now(user_id)
+    bot_equity = 0.0
+    if req.includeBot:
+        bot_equity = await _equity_now(users.ensure_bot()["id"])
+    try:
+        return challenges.create_challenge(
+            group_id, user_id, req.name, req.days, req.maxTrades, req.includeBot,
+            creator_equity, bot_equity,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/challenges/{challenge_id}/join")
+async def join_challenge(challenge_id: int, user_id: int = Depends(get_user_id)):
+    equity = await _equity_now(user_id)
+    try:
+        return challenges.join_challenge(challenge_id, user_id, equity)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/challenges/{challenge_id}")
+async def challenge_detail(challenge_id: int, user_id: int = Depends(get_user_id)):
+    challenge = challenges.get_challenge(challenge_id)
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Reto no encontrado")
+    if not groups.is_member(challenge["group_id"], user_id):
+        raise HTTPException(status_code=404, detail="Reto no encontrado")
+
+    rows = challenges.participants(challenge_id)
+    for r in rows:
+        equity = await _equity_now(r["userId"])
+        start = r["startEquity"] or equity or 1
+        r["equity"] = equity
+        r["returnPct"] = round(((equity - start) / start) * 100, 2) if start else 0.0
+    rows.sort(key=lambda r: r["returnPct"], reverse=True)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+
+    now = time.time()
+    return {
+        "challenge": challenge,
+        "ranking": rows,
+        "daysLeft": max(0, round((challenge["end_at"] - now) / 86400, 1)),
+        "finished": challenge["end_at"] <= now,
+        "myTradesUsed": challenges.trades_used(challenge_id, user_id),
+    }
 
 
 # ---------------- Mercado ----------------
@@ -453,6 +600,11 @@ async def trade(req: TradeRequest, user_id: int = Depends(get_user_id)):
     ai_prob = peek["prob"] if peek else None
 
     try:
+        challenges.check_trade_allowed(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
         if req.side.upper() == "BUY":
             result = portfolio.buy(user_id, symbol, quantity, price, ai_signal, ai_prob)
         elif req.side.upper() == "SELL":
@@ -556,18 +708,24 @@ async def get_settings():
         "aiProvider": database.get_setting("ai_provider", "local"),
         "openrouterModel": database.get_setting("openrouter_model", ""),
         "hasOpenrouterKey": bool(database.get_setting("openrouter_key", "") or config.OPENROUTER_KEY_ENV),
+        "deepseekModel": database.get_setting("deepseek_model", "") or config.DEEPSEEK_MODEL_ENV,
+        "hasDeepseekKey": bool(database.get_setting("deepseek_key", "") or config.DEEPSEEK_KEY_ENV),
         "ollamaModel": config.OLLAMA_MODEL,
     }
 
 
 @app.post("/api/settings")
 async def update_settings(req: SettingsRequest):
-    if req.aiProvider in ("local", "openrouter"):
+    if req.aiProvider in ("local", "openrouter", "deepseek"):
         database.set_setting("ai_provider", req.aiProvider)
     if req.openrouterModel is not None:
         database.set_setting("openrouter_model", req.openrouterModel)
     if req.openrouterKey is not None and req.openrouterKey.strip():
         database.set_setting("openrouter_key", req.openrouterKey.strip())
+    if req.deepseekModel is not None and req.deepseekModel.strip():
+        database.set_setting("deepseek_model", req.deepseekModel.strip())
+    if req.deepseekKey is not None and req.deepseekKey.strip():
+        database.set_setting("deepseek_key", req.deepseekKey.strip())
     return await get_settings()
 
 
@@ -621,6 +779,7 @@ async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)
     for it in ordered:
         sym = it.symbol
         try:
+            challenges.check_trade_allowed(user_id)
             price = _latest_prices.get(sym) or (await market.get_ticker(sym))["price"]
             quantity = it.quantity
             if quantity is None and it.quoteAmount is not None:
@@ -649,8 +808,9 @@ async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)
 
 # ---------------- WebSocket ----------------
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, userId: int | None = None):
-    await manager.connect(ws, userId)
+async def websocket_endpoint(ws: WebSocket):
+    user_id = auth.get_user_id_from_token(ws.cookies.get(SESSION_COOKIE))
+    await manager.connect(ws, user_id)
     try:
         if _latest_prices:
             await ws.send_json({

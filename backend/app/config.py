@@ -45,6 +45,12 @@ OPENROUTER_URL = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1")
 # Clave por defecto opcional (el usuario también puede ponerla en Ajustes)
 OPENROUTER_KEY_ENV = os.getenv("OPENROUTER_API_KEY", "")
 
+# ---------------- DeepSeek (IA en la nube, opcional) ----------------
+DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com/v1")
+# Clave por defecto opcional (el usuario también puede ponerla en Ajustes)
+DEEPSEEK_KEY_ENV = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL_ENV = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
 # ---------------- Catálogo de instrumentos ----------------
 # id -> {source, yahoo?, name, category, tier}
 # Para cripto el id es el símbolo de Binance (p.ej. BTCUSDT).

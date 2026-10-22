@@ -9,14 +9,19 @@ services:
       - POLL_INTERVAL=${POLL_INTERVAL:-3}
       - YAHOO_POLL_INTERVAL=${YAHOO_POLL_INTERVAL:-20}
       - DATA_DIR=/app/data
+      # IA local (Ollama) deliberadamente NO desplegada en este host (solo
+      # ~3.8GB RAM): si OLLAMA_URL no resuelve, el backend lo trata como
+      # "no disponible" y sigue funcionando con DeepSeek/guía integrada.
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - DEEPSEEK_URL=${DEEPSEEK_URL:-https://api.deepseek.com/v1}
     volumes:
       - tradelab-data:/app/data
     expose:
       - "8000"
-    depends_on:
-      - ollama
+    networks: [tradinglab]
 
   frontend:
     build: ./frontend
@@ -24,27 +29,20 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
-    ports:
-      - "${APP_PORT:-8080}:80"
-
-  # IA local (Llama) — descarga el modelo automáticamente la primera vez.
-  ollama:
-    image: ollama/ollama:latest
-    container_name: tradelab-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-models:/root/.ollama
-    expose:
-      - "11434"
-    # Si tienes GPU NVIDIA y quieres acelerarlo, descomenta:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+      - "traefik.http.routers.tradinglab.rule=Host(`tradinglab.pirueta.online`)"
+      - "traefik.http.routers.tradinglab.entrypoints=websecure"
+      - "traefik.http.routers.tradinglab.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tradinglab.loadbalancer.server.port=80"
+    networks: [tradinglab, traefik_proxy]
 
 volumes:
   tradelab-data:
-  ollama-models:
+
+networks:
+  tradinglab:
+    driver: bridge
+  traefik_proxy:
+    external: true

@@ -2,6 +2,7 @@
 
 - Proveedor "local": LLM local (Llama vía Ollama), privado y gratis.
 - Proveedor "openrouter": modelos en la nube (requiere la clave del usuario).
+- Proveedor "deepseek": modelos DeepSeek en la nube (requiere clave de DeepSeek).
 
 Si el LLM elegido no está disponible, se responde con una base de conocimiento
 integrada, de modo que el asistente SIEMPRE funciona.
@@ -110,6 +111,14 @@ def _openrouter_key() -> str:
 
 def _openrouter_model() -> str:
     return database.get_setting("openrouter_model", "")
+
+
+def _deepseek_key() -> str:
+    return database.get_setting("deepseek_key", "") or config.DEEPSEEK_KEY_ENV
+
+
+def _deepseek_model() -> str:
+    return database.get_setting("deepseek_model", "") or config.DEEPSEEK_MODEL_ENV
 
 
 # ---------------- Ollama (local) ----------------
@@ -240,6 +249,41 @@ async def _openrouter_chat(messages: list[dict], num_predict: int, temperature: 
     return text
 
 
+# ---------------- DeepSeek (nube) ----------------
+async def _deepseek_chat(messages: list[dict], num_predict: int, temperature: float) -> str | None:
+    key = _deepseek_key()
+    model = _deepseek_model()
+    if not key:
+        raise RuntimeError("Falta tu clave de DeepSeek (Ajustes)")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    body = {"model": model, "messages": messages, "max_tokens": num_predict, "temperature": temperature}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        data = None
+        for attempt in range(2):
+            r = await client.post(f"{config.DEEPSEEK_URL}/chat/completions", headers=headers, json=body)
+            if r.status_code == 429 and attempt == 0:
+                await asyncio.sleep(2.0)  # rate-limit temporal: reintenta una vez
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"DeepSeek {r.status_code}: {r.text[:200]}")
+            data = r.json()
+            break
+    if not data:
+        raise RuntimeError("DeepSeek: sin respuesta tras reintento (rate-limited)")
+    if data.get("error"):
+        raise RuntimeError(f"DeepSeek: {data['error'].get('message', data['error'])}")
+
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    text = (msg.get("content") or "").strip()
+    if not text:
+        raise RuntimeError("DeepSeek devolvió una respuesta vacía")
+    return text
+
+
 async def list_openrouter_models(only_free: bool = True) -> list[dict]:
     """Lista modelos de OpenRouter (endpoint público). Filtra los gratuitos."""
     try:
@@ -269,12 +313,19 @@ async def list_openrouter_models(only_free: bool = True) -> list[dict]:
 async def _run(messages: list[dict], num_predict: int, temperature: float, kind: str) -> dict:
     """Ejecuta el LLM del proveedor activo, registra el uso y devuelve detalle."""
     provider = _provider()
-    model = _openrouter_model() if provider == "openrouter" else config.OLLAMA_MODEL
+    if provider == "openrouter":
+        model = _openrouter_model()
+    elif provider == "deepseek":
+        model = _deepseek_model()
+    else:
+        model = config.OLLAMA_MODEL
     t0 = time.time()
     text, ok, err = None, False, None
     try:
         if provider == "openrouter":
             text = await _openrouter_chat(messages, num_predict, temperature)
+        elif provider == "deepseek":
+            text = await _deepseek_chat(messages, num_predict, temperature)
         else:
             text = await _ollama_chat(messages, num_predict, temperature)
         ok = text is not None
@@ -295,7 +346,7 @@ async def _run_with_fallback(messages: list[dict], num_predict: int, temperature
     res = await _run(messages, num_predict, temperature, kind)
     if res["text"]:
         return res["text"]
-    if _provider() == "openrouter":  # respaldo a la IA local
+    if _provider() in ("openrouter", "deepseek"):  # respaldo a la IA local
         t0 = time.time()
         text, ok, err = None, False, None
         try:
@@ -349,6 +400,15 @@ async def status() -> dict:
         else:
             state, msg = "unavailable", "Elige un modelo de OpenRouter (Ajustes)"
         return {"provider": "openrouter", "state": state, "model": model, "llm": state == "ready", "message": msg}
+
+    if provider == "deepseek":
+        model = _deepseek_model()
+        has_key = bool(_deepseek_key())
+        if has_key and model:
+            state, msg = "ready", f"DeepSeek · {model}"
+        else:
+            state, msg = "unavailable", "Falta tu clave de DeepSeek (Ajustes)"
+        return {"provider": "deepseek", "state": state, "model": model, "llm": state == "ready", "message": msg}
 
     # local
     await ensure_model()
