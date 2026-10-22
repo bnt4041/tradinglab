@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS challenges (
     days INTEGER NOT NULL,
     max_trades INTEGER NOT NULL,
     include_bot INTEGER NOT NULL DEFAULT 0,
+    initial_balance REAL NOT NULL DEFAULT 10000,
     start_at REAL NOT NULL,
     end_at REAL NOT NULL,
     created_by INTEGER NOT NULL,
@@ -287,6 +288,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         if "reset_requested_at" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN reset_requested_at REAL")
+        if _table_exists(conn, "challenges") and "initial_balance" not in _columns(conn, "challenges"):
+            conn.execute("ALTER TABLE challenges ADD COLUMN initial_balance REAL NOT NULL DEFAULT 10000")
 
         # Usuario por defecto si no hay ninguno
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
@@ -360,7 +363,8 @@ def _ensure_account(conn, user_id: int) -> None:
         )
 
 
-def reset_account(user_id: int) -> None:
+def reset_account(user_id: int, balance: float | None = None, reason: str | None = None) -> None:
+    amount = config.INITIAL_BALANCE if balance is None else balance
     with get_conn() as conn:
         now = time.time()
         conn.execute("DELETE FROM positions WHERE user_id = ?", (user_id,))
@@ -369,10 +373,11 @@ def reset_account(user_id: int) -> None:
         conn.execute("DELETE FROM equity_snapshots WHERE user_id = ?", (user_id,))
         conn.execute(
             "UPDATE account SET balance = ?, net_contributions = ?, created_at = ? WHERE user_id = ?",
-            (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now, user_id),
+            (amount, amount, now, user_id),
         )
+        message = reason or f"Tu cuenta demo se ha reiniciado a {amount:,.0f} USDT."
         conn.execute(
             "INSERT INTO notifications (user_id, type, title, message, symbol, read, created_at) "
             "VALUES (?, 'info', 'Cuenta reiniciada', ?, '', 0, ?)",
-            (user_id, f"Tu cuenta demo se ha reiniciado a {config.INITIAL_BALANCE:,.0f} USDT.", now),
+            (user_id, message, now),
         )

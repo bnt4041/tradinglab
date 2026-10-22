@@ -18,6 +18,7 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
   const [cDays, setCDays] = useState(7);
   const [cMaxTrades, setCMaxTrades] = useState(10);
   const [cBot, setCBot] = useState(true);
+  const [cInitialBalance, setCInitialBalance] = useState(10000);
 
   const loadGroups = () => api.groups().then(setMyGroups).catch((e) => onToast?.(e.message, "danger"));
   useEffect(() => { loadGroups(); /* eslint-disable-next-line */ }, []);
@@ -59,10 +60,12 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
 
   const createChallenge = async () => {
     if (!cName.trim()) return onToast?.("Dale un nombre al reto", "danger");
+    if (!cInitialBalance || cInitialBalance < 100) return onToast?.("El importe inicial debe ser de al menos 100 USDT", "danger");
     setBusy(true);
     try {
       const ch = await api.createChallenge(groupDetail.group.id, {
         name: cName.trim(), days: Number(cDays), maxTrades: Number(cMaxTrades), includeBot: cBot,
+        initialBalance: Number(cInitialBalance),
       });
       setCName("");
       onToast?.(`Reto "${ch.name}" creado`, "success");
@@ -70,11 +73,16 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
     } catch (e) { onToast?.(e.message, "danger"); } finally { setBusy(false); }
   };
 
-  const joinChallenge = async (id) => {
+  const joinChallenge = async (id, initialBalance) => {
+    const ok = window.confirm(
+      `Al unirte, tu cartera se reinicia a ${fmt.usd(initialBalance)} USDT: se borran tus posiciones y ` +
+      `operaciones actuales (todos los participantes empiezan igual). ¿Continuar?`
+    );
+    if (!ok) return;
     setBusy(true);
     try {
       await api.joinChallenge(id);
-      onToast?.("Te has unido al reto", "success");
+      onToast?.("Te has unido al reto — tu cartera se ha reiniciado", "success");
       openChallenge(id);
     } catch (e) { onToast?.(e.message, "danger"); } finally { setBusy(false); }
   };
@@ -124,6 +132,7 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
               cDays={cDays} setCDays={setCDays}
               cMaxTrades={cMaxTrades} setCMaxTrades={setCMaxTrades}
               cBot={cBot} setCBot={setCBot}
+              cInitialBalance={cInitialBalance} setCInitialBalance={setCInitialBalance}
               onCreateChallenge={createChallenge}
               busy={busy}
             />
@@ -133,7 +142,7 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
             <ChallengeView
               detail={challengeDetail}
               currentUserId={currentUserId}
-              onJoin={() => joinChallenge(challengeDetail.challenge.id)}
+              onJoin={() => joinChallenge(challengeDetail.challenge.id, challengeDetail.challenge.initial_balance)}
               busy={busy}
             />
           )}
@@ -202,7 +211,8 @@ function ListView({ groups, onOpen, newGroupName, setNewGroupName, onCreate, joi
 
 function GroupView({
   detail, currentUserId, onOpenChallenge, onCopyCode,
-  cName, setCName, cDays, setCDays, cMaxTrades, setCMaxTrades, cBot, setCBot, onCreateChallenge, busy,
+  cName, setCName, cDays, setCDays, cMaxTrades, setCMaxTrades, cBot, setCBot,
+  cInitialBalance, setCInitialBalance, onCreateChallenge, busy,
 }) {
   const { group, members, challenges } = detail;
   const now = Date.now() / 1000;
@@ -252,7 +262,8 @@ function GroupView({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-semibold text-slate-800">{c.name}</div>
-                    <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-400">
+                      <span className="font-semibold text-slate-500">{fmt.usd(c.initial_balance)} USDT</span>
                       <span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> {c.days} días</span>
                       <span className="flex items-center gap-1"><Repeat className="h-3 w-3" /> {c.max_trades} mov.</span>
                       {!!c.include_bot && <span className="flex items-center gap-1"><Bot className="h-3 w-3" /> IA</span>}
@@ -273,6 +284,11 @@ function GroupView({
         <div className="space-y-2.5">
           <input className="input" placeholder="Nombre del reto (p. ej. Reto de la semana)" value={cName} maxLength={60}
             onChange={(e) => setCName(e.target.value)} />
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-slate-600">Cartera inicial (USDT, igual para todos)</span>
+            <input className="input num" type="number" min={100} step={100} value={cInitialBalance}
+              onChange={(e) => setCInitialBalance(e.target.value)} />
+          </label>
           <div className="grid grid-cols-2 gap-2.5">
             <label className="block">
               <span className="mb-1 block text-xs font-medium text-slate-600">Duración (días)</span>
@@ -290,6 +306,10 @@ function GroupView({
               className="h-4 w-4 rounded border-slate-300 text-brand-600" />
             <Bot className="h-4 w-4" /> Que compita también el Agente IA
           </label>
+          <p className="text-[11px] text-slate-400">
+            Al unirse a un reto, la cartera de cada participante se reinicia a esta cantidad (se borran sus
+            posiciones y operaciones anteriores) para que todos empiecen en igualdad.
+          </p>
           <button onClick={onCreateChallenge} disabled={busy} className="btn-primary w-full">
             <Plus className="h-4 w-4" /> Crear reto
           </button>
@@ -305,16 +325,22 @@ function ChallengeView({ detail, currentUserId, onJoin, busy }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-2 gap-2.5">
+        <StatBox label="Cartera inicial" value={`${fmt.usd(challenge.initial_balance)} USDT`} />
         <StatBox label="Estado" value={finished ? "Terminado" : "Activo"} />
         <StatBox label="Días restantes" value={finished ? "0" : daysLeft} />
         <StatBox label="Tus movimientos" value={amIn ? `${myTradesUsed}/${challenge.max_trades}` : "—"} />
       </div>
 
       {!amIn && !finished && (
-        <button onClick={onJoin} disabled={busy} className="btn-primary w-full">
-          <Trophy className="h-4 w-4" /> Unirme a este reto
-        </button>
+        <div>
+          <button onClick={onJoin} disabled={busy} className="btn-primary w-full">
+            <Trophy className="h-4 w-4" /> Unirme a este reto
+          </button>
+          <p className="mt-1.5 text-center text-[11px] text-slate-400">
+            Reinicia tu cartera a {fmt.usd(challenge.initial_balance)} USDT.
+          </p>
+        </div>
       )}
 
       <div>

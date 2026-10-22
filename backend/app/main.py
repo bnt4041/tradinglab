@@ -217,6 +217,7 @@ class ChallengeCreateRequest(BaseModel):
     days: int
     maxTrades: int
     includeBot: bool = False
+    initialBalance: float = 10000
 
 
 class ResetRequestRequest(BaseModel):
@@ -433,14 +434,9 @@ async def _equity_now(uid: int) -> float:
 
 @app.post("/api/groups/{group_id}/challenges")
 async def create_challenge(group_id: int, req: ChallengeCreateRequest, user_id: int = Depends(get_user_id)):
-    creator_equity = await _equity_now(user_id)
-    bot_equity = 0.0
-    if req.includeBot:
-        bot_equity = await _equity_now(users.ensure_bot()["id"])
     try:
         return challenges.create_challenge(
-            group_id, user_id, req.name, req.days, req.maxTrades, req.includeBot,
-            creator_equity, bot_equity,
+            group_id, user_id, req.name, req.days, req.maxTrades, req.includeBot, req.initialBalance,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -448,9 +444,8 @@ async def create_challenge(group_id: int, req: ChallengeCreateRequest, user_id: 
 
 @app.post("/api/challenges/{challenge_id}/join")
 async def join_challenge(challenge_id: int, user_id: int = Depends(get_user_id)):
-    equity = await _equity_now(user_id)
     try:
-        return challenges.join_challenge(challenge_id, user_id, equity)
+        return challenges.join_challenge(challenge_id, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
