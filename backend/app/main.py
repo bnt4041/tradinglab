@@ -1,0 +1,665 @@
+"""API FastAPI del emulador de trading (multi-activo + IA local + asesor)."""
+import asyncio
+import contextlib
+import time
+
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from . import advisor, alerts, assistant, basket, bot, coach, config, database, external, market, ml, portfolio, trends, users
+
+app = FastAPI(title="Emulador de Trading", version="3.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
+
+ACTIVE_CRYPTO: list[str] = list(config.CRYPTO_IDS)
+YAHOO_IDS: list[str] = list(config.YAHOO_IDS)
+_latest_prices: dict[str, float] = {}
+
+
+def get_user_id(x_user_id: int | None = Header(default=None)) -> int:
+    if x_user_id is not None and users.user_exists(x_user_id):
+        return x_user_id
+    all_users = users.list_users()
+    if not all_users:
+        raise HTTPException(status_code=500, detail="No hay usuarios configurados")
+    return all_users[0]["id"]
+
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.active: dict[WebSocket, int | None] = {}
+
+    async def connect(self, ws, user_id):
+        await ws.accept()
+        self.active[ws] = user_id
+
+    def disconnect(self, ws):
+        self.active.pop(ws, None)
+
+    async def broadcast(self, message):
+        for ws in list(self.active):
+            try:
+                await ws.send_json(message)
+            except Exception:  # noqa: BLE001
+                self.disconnect(ws)
+
+    async def send_to_user(self, user_id, message):
+        for ws, uid in list(self.active.items()):
+            if uid == user_id:
+                try:
+                    await ws.send_json(message)
+                except Exception:  # noqa: BLE001
+                    self.disconnect(ws)
+
+
+manager = ConnectionManager()
+
+
+def _ticker_payload(t: dict) -> dict:
+    return {k: t.get(k) for k in ("symbol", "price", "changePercent", "high", "low", "volume")}
+
+
+async def _broadcast_and_alert(tickers: list[dict]) -> None:
+    for t in tickers:
+        _latest_prices[t["symbol"]] = t["price"]
+    triggered = alerts.check_alerts(_latest_prices)
+    await manager.broadcast({"type": "prices", "data": [_ticker_payload(t) for t in tickers]})
+    by_user: dict[int, list[dict]] = {}
+    for tr in triggered:
+        by_user.setdefault(tr["user_id"], []).append(tr)
+    for uid, items in by_user.items():
+        await manager.send_to_user(uid, {"type": "notification", "unread": alerts.unread_count(uid), "data": items})
+
+
+async def crypto_loop() -> None:
+    while True:
+        try:
+            tickers = await market.get_binance_tickers(ACTIVE_CRYPTO)
+            await _broadcast_and_alert(tickers)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[crypto_loop] {exc}")
+        await asyncio.sleep(config.POLL_INTERVAL)
+
+
+async def yahoo_loop() -> None:
+    while True:
+        try:
+            tickers = await market.get_yahoo_tickers(YAHOO_IDS)
+            if tickers:
+                await _broadcast_and_alert(tickers)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[yahoo_loop] {exc}")
+        await asyncio.sleep(config.YAHOO_POLL_INTERVAL)
+
+
+async def _prices_for_user(user_id: int) -> dict[str, float]:
+    held = [p["symbol"] for p in portfolio.get_positions(user_id)]
+    prices = dict(_latest_prices)
+    for sym in held:
+        if sym not in prices:
+            with contextlib.suppress(Exception):
+                prices[sym] = (await market.get_ticker(sym))["price"]
+    return prices
+
+
+async def _snapshot_user(user_id: int) -> dict:
+    prices = await _prices_for_user(user_id)
+    s = portfolio.portfolio_summary(user_id, prices)
+    portfolio.record_snapshot(user_id, s["equity"], s["balance"], s["positionsValue"])
+    return s
+
+
+async def snapshot_loop() -> None:
+    """Guarda periódicamente el valor de la cartera de cada usuario (incl. Agente IA)."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            for u in users.list_all_users():
+                await _snapshot_user(u["id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[snapshot_loop] {exc}")
+
+
+async def bot_loop() -> None:
+    """El Agente IA opera una vez al día (y una vez al arrancar si toca)."""
+    await asyncio.sleep(25)  # dar tiempo a que haya precios
+    while True:
+        try:
+            if time.time() - bot.last_run() >= 86400:  # 24h
+                await bot.run_cycle(dict(_latest_prices))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bot_loop] {exc}")
+        await asyncio.sleep(3600)  # revisa cada hora
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    database.init_db()
+    global ACTIVE_CRYPTO
+    try:
+        ACTIVE_CRYPTO = await market.filter_valid_symbols(config.CRYPTO_IDS)
+    except Exception:  # noqa: BLE001
+        ACTIVE_CRYPTO = list(config.CRYPTO_IDS)
+    with contextlib.suppress(Exception):
+        await assistant.ensure_model()  # descarga el LLM en segundo plano
+    with contextlib.suppress(Exception):
+        users.ensure_bot()  # crea el perfil del Agente IA
+    app.state.tasks = [
+        asyncio.create_task(crypto_loop()),
+        asyncio.create_task(yahoo_loop()),
+        asyncio.create_task(snapshot_loop()),
+        asyncio.create_task(bot_loop()),
+    ]
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    for task in getattr(app.state, "tasks", []):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+# ---------------- Modelos ----------------
+class TradeRequest(BaseModel):
+    symbol: str
+    side: str
+    quantity: float | None = None
+    quoteAmount: float | None = None
+
+
+class AlertRequest(BaseModel):
+    symbol: str
+    direction: str
+    targetPrice: float
+    note: str = ""
+
+
+class UserRequest(BaseModel):
+    name: str
+
+
+class CashRequest(BaseModel):
+    amount: float
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    context: dict | None = None
+
+
+class SettingsRequest(BaseModel):
+    aiProvider: str | None = None
+    openrouterModel: str | None = None
+    openrouterKey: str | None = None
+
+
+class BasketItem(BaseModel):
+    symbol: str
+    side: str
+    quantity: float | None = None
+    quoteAmount: float | None = None
+
+
+class BasketRequest(BaseModel):
+    items: list[BasketItem]
+
+
+# ---------------- Salud y usuarios ----------------
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "crypto": len(ACTIVE_CRYPTO), "yahoo": len(YAHOO_IDS)}
+
+
+@app.get("/api/users")
+async def get_users():
+    return users.list_users()
+
+
+@app.post("/api/users")
+async def create_user(req: UserRequest):
+    try:
+        return users.create_user(req.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(user_id: int):
+    try:
+        users.delete_user(user_id)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/me")
+async def me(user_id: int = Depends(get_user_id)):
+    return {"user": users.get_user(user_id)}
+
+
+# ---------------- Mercado ----------------
+def _decorate(t: dict) -> dict:
+    inst = config.instrument(t["symbol"]) or {}
+    t["name"] = inst.get("name", t["symbol"])
+    t["category"] = inst.get("category", "cripto")
+    t["tier"] = inst.get("tier", "secundario")
+    t["source"] = inst.get("source", "binance")
+    return t
+
+
+@app.get("/api/symbols")
+async def symbols():
+    results: list[dict] = []
+    with contextlib.suppress(Exception):
+        results += await market.get_binance_tickers(ACTIVE_CRYPTO)
+    with contextlib.suppress(Exception):
+        results += await market.get_yahoo_tickers(YAHOO_IDS)
+    if not results:
+        raise HTTPException(status_code=502, detail="No se pudieron cargar los mercados")
+    return [_decorate(t) for t in results]
+
+
+@app.get("/api/categories")
+async def categories():
+    return {"order": config.CATEGORIES, "labels": config.CATEGORY_LABELS}
+
+
+@app.get("/api/ticker/{symbol}")
+async def ticker(symbol: str):
+    try:
+        return await market.get_ticker(symbol)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/klines/{symbol}")
+async def klines(symbol: str, interval: str = "1h", limit: int = 300):
+    try:
+        return await market.get_klines(symbol, interval=interval, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/predict/{symbol}")
+async def predict(symbol: str, interval: str = "1h"):
+    try:
+        return await ml.predict(symbol, interval=interval)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/advisor/{symbol}")
+async def get_advisor(symbol: str, interval: str = "1h"):
+    try:
+        return await advisor.advise(symbol, interval=interval)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/news/{symbol}")
+async def get_news(symbol: str):
+    return await external.get_news(symbol)
+
+
+@app.get("/api/fear-greed")
+async def fear_greed():
+    return await external.get_fear_greed()
+
+
+@app.get("/api/market/trends")
+async def market_trends():
+    try:
+        return await trends.market_trends()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/rates")
+async def rates():
+    return await market.get_fx_rates()
+
+
+# ---------------- Cartera ----------------
+@app.get("/api/portfolio")
+async def get_portfolio(user_id: int = Depends(get_user_id)):
+    held = [p["symbol"] for p in portfolio.get_positions(user_id)]
+    prices = dict(_latest_prices)
+    for sym in held:
+        if sym not in prices:
+            with contextlib.suppress(Exception):
+                prices[sym] = (await market.get_ticker(sym))["price"]
+    return portfolio.portfolio_summary(user_id, prices)
+
+
+@app.get("/api/trades")
+async def get_trades(user_id: int = Depends(get_user_id)):
+    return portfolio.get_trades(user_id)
+
+
+@app.get("/api/portfolio/history")
+async def portfolio_history(user_id: int = Depends(get_user_id)):
+    await _snapshot_user(user_id)  # registra el punto actual al abrir
+    snaps = portfolio.get_history(user_id)
+    points = [{"t": s["ts"], "equity": s["equity"]} for s in snaps]
+    acc = portfolio.get_account(user_id)
+    created = acc.get("created_at", 0)
+    net = acc.get("net_contributions", 0)
+    # Punto de partida (capital aportado) para que la curva tenga inicio
+    if not points or points[0]["t"] > created + 1:
+        points.insert(0, {"t": created, "equity": net})
+    return {"points": points, "net": net}
+
+
+@app.get("/api/portfolio/stats")
+async def portfolio_stats(user_id: int = Depends(get_user_id)):
+    return portfolio.stats(user_id)
+
+
+def _equity_history(uid: int) -> list[dict]:
+    snaps = portfolio.get_history(uid)
+    pts = [{"t": s["ts"], "equity": s["equity"]} for s in snaps]
+    acc = portfolio.get_account(uid)
+    created = acc.get("created_at", 0)
+    if not pts or pts[0]["t"] > created + 1:
+        pts.insert(0, {"t": created, "equity": acc.get("net_contributions", 0)})
+    return pts
+
+
+@app.get("/api/bot/compare")
+async def bot_compare(user_id: int = Depends(get_user_id)):
+    botu = users.ensure_bot()
+    bot_id = botu["id"]
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    with contextlib.suppress(Exception):
+        await _snapshot_user(bot_id)
+
+    prices = dict(_latest_prices)
+    for uid in (user_id, bot_id):
+        for p in portfolio.get_positions(uid):
+            if p["symbol"] not in prices:
+                with contextlib.suppress(Exception):
+                    prices[p["symbol"]] = (await market.get_ticker(p["symbol"]))["price"]
+
+    us = portfolio.portfolio_summary(user_id, prices)
+    bs = portfolio.portfolio_summary(bot_id, prices)
+    diff = round(us["totalPnlPercent"] - bs["totalPnlPercent"], 2)
+    leader = "user" if diff > 0.05 else "bot" if diff < -0.05 else "tie"
+
+    return {
+        "user": {
+            "name": (users.get_user(user_id) or {}).get("name", "Tú"),
+            "equity": us["equity"], "pnlPct": round(us["totalPnlPercent"], 2),
+            "history": _equity_history(user_id),
+        },
+        "bot": {
+            "name": botu["name"], "color": botu["color"],
+            "equity": bs["equity"], "pnlPct": round(bs["totalPnlPercent"], 2),
+            "history": _equity_history(bot_id),
+            "holdings": bs["holdings"],
+            "trades": portfolio.get_trades(bot_id, 12),
+            "lastRun": bot.last_run(),
+            "log": [n for n in alerts.list_notifications(bot_id, 40) if n["type"] == "signal"][:15],
+        },
+        "leader": leader, "diffPct": diff,
+    }
+
+
+@app.post("/api/bot/run")
+async def bot_run():
+    return await bot.run_cycle(dict(_latest_prices))
+
+
+@app.get("/api/portfolio/evaluation")
+async def portfolio_evaluation(user_id: int = Depends(get_user_id)):
+    prices = await _prices_for_user(user_id)
+    s = portfolio.portfolio_summary(user_id, prices)
+    return await coach.evaluate(user_id, s["equity"], s["netContributions"])
+
+
+@app.get("/api/account/movements")
+async def get_movements(user_id: int = Depends(get_user_id)):
+    return portfolio.get_cash_movements(user_id)
+
+
+@app.post("/api/trade")
+async def trade(req: TradeRequest, user_id: int = Depends(get_user_id)):
+    symbol = req.symbol
+    try:
+        price = _latest_prices.get(symbol) or (await market.get_ticker(symbol))["price"]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"No se pudo obtener el precio: {exc}")
+
+    quantity = req.quantity
+    if quantity is None and req.quoteAmount is not None:
+        quantity = req.quoteAmount / price
+    if quantity is None or quantity <= 0:
+        raise HTTPException(status_code=400, detail="Indica una cantidad válida")
+
+    # Señal de la IA en este momento (solo si ya está cacheada, sin bloquear)
+    peek = ml.peek_signal(symbol, "1h")
+    ai_signal = peek["signal"] if peek else None
+    ai_prob = peek["prob"] if peek else None
+
+    try:
+        if req.side.upper() == "BUY":
+            result = portfolio.buy(user_id, symbol, quantity, price, ai_signal, ai_prob)
+        elif req.side.upper() == "SELL":
+            result = portfolio.sell(user_id, symbol, quantity, price, ai_signal, ai_prob)
+        else:
+            raise ValueError("side debe ser BUY o SELL")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    return result
+
+
+@app.post("/api/account/deposit")
+async def deposit(req: CashRequest, user_id: int = Depends(get_user_id)):
+    try:
+        res = portfolio.deposit(user_id, req.amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    return res
+
+
+@app.post("/api/account/withdraw")
+async def withdraw(req: CashRequest, user_id: int = Depends(get_user_id)):
+    try:
+        res = portfolio.withdraw(user_id, req.amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    return res
+
+
+@app.post("/api/account/reset")
+async def reset_account(user_id: int = Depends(get_user_id)):
+    database.reset_account(user_id)
+    await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    return {"ok": True}
+
+
+# ---------------- Alertas ----------------
+@app.get("/api/alerts")
+async def get_alerts(user_id: int = Depends(get_user_id)):
+    return alerts.list_alerts(user_id)
+
+
+@app.post("/api/alerts")
+async def post_alert(req: AlertRequest, user_id: int = Depends(get_user_id)):
+    try:
+        return alerts.create_alert(user_id, req.symbol, req.direction, req.targetPrice, req.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def remove_alert(alert_id: int, user_id: int = Depends(get_user_id)):
+    alerts.delete_alert(user_id, alert_id)
+    return {"ok": True}
+
+
+# ---------------- Notificaciones ----------------
+@app.get("/api/notifications")
+async def get_notifications(user_id: int = Depends(get_user_id)):
+    return {"items": alerts.list_notifications(user_id), "unread": alerts.unread_count(user_id)}
+
+
+@app.post("/api/notifications/read")
+async def read_notifications(user_id: int = Depends(get_user_id)):
+    alerts.mark_all_read(user_id)
+    return {"ok": True}
+
+
+@app.delete("/api/notifications")
+async def clear_notifications(user_id: int = Depends(get_user_id)):
+    alerts.clear_notifications(user_id)
+    return {"ok": True}
+
+
+# ---------------- Asistente IA ----------------
+@app.get("/api/assistant/status")
+async def assistant_status():
+    return await assistant.status()
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(req: ChatRequest):
+    msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+    return await assistant.chat(msgs, req.context)
+
+
+# ---------------- Ajustes de IA ----------------
+@app.get("/api/settings")
+async def get_settings():
+    return {
+        "aiProvider": database.get_setting("ai_provider", "local"),
+        "openrouterModel": database.get_setting("openrouter_model", ""),
+        "hasOpenrouterKey": bool(database.get_setting("openrouter_key", "") or config.OPENROUTER_KEY_ENV),
+        "ollamaModel": config.OLLAMA_MODEL,
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(req: SettingsRequest):
+    if req.aiProvider in ("local", "openrouter"):
+        database.set_setting("ai_provider", req.aiProvider)
+    if req.openrouterModel is not None:
+        database.set_setting("openrouter_model", req.openrouterModel)
+    if req.openrouterKey is not None and req.openrouterKey.strip():
+        database.set_setting("openrouter_key", req.openrouterKey.strip())
+    return await get_settings()
+
+
+@app.get("/api/openrouter/models")
+async def openrouter_models():
+    return await assistant.list_openrouter_models(only_free=True)
+
+
+@app.post("/api/ai/test")
+async def ai_test():
+    return await assistant.test()
+
+
+@app.get("/api/ai/log")
+async def ai_log():
+    return assistant.get_log(50)
+
+
+# ---------------- Cesta (operación conjunta) ----------------
+async def _notional(symbol: str, side: str, quantity: float | None, quote: float | None, price: float) -> float:
+    if quote is not None:
+        return quote
+    if quantity is not None:
+        return quantity * price
+    return 0.0
+
+
+@app.post("/api/basket/advice")
+async def basket_advice(req: BasketRequest):
+    items = []
+    for it in req.items:
+        sym = it.symbol
+        try:
+            price = _latest_prices.get(sym) or (await market.get_ticker(sym))["price"]
+        except Exception:  # noqa: BLE001
+            price = 0
+        items.append({
+            "symbol": sym, "side": it.side,
+            "notional": await _notional(sym, it.side, it.quantity, it.quoteAmount, price),
+        })
+    if not items:
+        raise HTTPException(status_code=400, detail="La cesta está vacía")
+    return await basket.advise(items)
+
+
+@app.post("/api/basket/execute")
+async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)):
+    results = []
+    # Ejecutamos primero las VENTAS: su efectivo financia las compras de la cesta
+    ordered = sorted(req.items, key=lambda it: 0 if it.side.upper() == "SELL" else 1)
+    for it in ordered:
+        sym = it.symbol
+        try:
+            price = _latest_prices.get(sym) or (await market.get_ticker(sym))["price"]
+            quantity = it.quantity
+            if quantity is None and it.quoteAmount is not None:
+                quantity = it.quoteAmount / price
+            if not quantity or quantity <= 0:
+                raise ValueError("Cantidad inválida")
+            peek = ml.peek_signal(sym, "1h")
+            ai_s = peek["signal"] if peek else None
+            ai_p = peek["prob"] if peek else None
+            if it.side.upper() == "BUY":
+                portfolio.buy(user_id, sym, quantity, price, ai_s, ai_p)
+            else:
+                portfolio.sell(user_id, sym, quantity, price, ai_s, ai_p)
+            results.append({"symbol": sym, "side": it.side.upper(), "ok": True})
+        except ValueError as exc:
+            results.append({"symbol": sym, "side": it.side.upper(), "ok": False, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"symbol": sym, "side": it.side.upper(), "ok": False, "error": str(exc)})
+
+    await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
+    with contextlib.suppress(Exception):
+        await _snapshot_user(user_id)
+    ok = sum(1 for r in results if r["ok"])
+    return {"results": results, "executed": ok, "total": len(results)}
+
+
+# ---------------- WebSocket ----------------
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket, userId: int | None = None):
+    await manager.connect(ws, userId)
+    try:
+        if _latest_prices:
+            await ws.send_json({
+                "type": "prices",
+                "data": [{"symbol": s, "price": p} for s, p in _latest_prices.items()],
+            })
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
+    except Exception:  # noqa: BLE001
+        manager.disconnect(ws)

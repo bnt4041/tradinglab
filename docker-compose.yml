@@ -1,0 +1,50 @@
+services:
+  backend:
+    build: ./backend
+    container_name: tradelab-backend
+    restart: unless-stopped
+    environment:
+      - INITIAL_BALANCE=${INITIAL_BALANCE:-10000}
+      - FEE_RATE=${FEE_RATE:-0.001}
+      - POLL_INTERVAL=${POLL_INTERVAL:-3}
+      - YAHOO_POLL_INTERVAL=${YAHOO_POLL_INTERVAL:-20}
+      - DATA_DIR=/app/data
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2}
+    volumes:
+      - tradelab-data:/app/data
+    expose:
+      - "8000"
+    depends_on:
+      - ollama
+
+  frontend:
+    build: ./frontend
+    container_name: tradelab-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${APP_PORT:-8080}:80"
+
+  # IA local (Llama) — descarga el modelo automáticamente la primera vez.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tradelab-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    expose:
+      - "11434"
+    # Si tienes GPU NVIDIA y quieres acelerarlo, descomenta:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  tradelab-data:
+  ollama-models:
