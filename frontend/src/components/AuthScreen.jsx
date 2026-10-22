@@ -6,8 +6,8 @@ function tokenFromUrl() {
   return new URLSearchParams(window.location.search).get("resetToken") || "";
 }
 
-export default function AuthScreen({ onAuthenticated, onToast }) {
-  const [mode, setMode] = useState(() => (tokenFromUrl() ? "reset" : "login")); // login | register | forgot | reset
+export default function AuthScreen({ onAuthenticated, onToast, initialMode = "login", onBack }) {
+  const [mode, setMode] = useState(() => (tokenFromUrl() ? "reset" : initialMode)); // login | register | forgot | reset
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -235,6 +235,12 @@ export default function AuthScreen({ onAuthenticated, onToast }) {
             </button>
           )}
         </div>
+
+        {onBack && (
+          <button onClick={onBack} className="mt-4 flex w-full items-center justify-center gap-1.5 text-xs font-medium text-slate-400 hover:text-slate-600">
+            <ArrowLeft className="h-3.5 w-3.5" /> Volver al inicio
+          </button>
+        )}
 
         <p className="mt-4 text-center text-[11px] text-slate-400">
           Dinero ficticio, datos de mercado reales. No es asesoramiento financiero.

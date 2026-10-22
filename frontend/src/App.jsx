@@ -14,6 +14,7 @@ import Toasts from "./components/Toasts";
 import UserMenu from "./components/UserMenu";
 import ProfileModal from "./components/ProfileModal";
 import AuthScreen from "./components/AuthScreen";
+import Landing from "./components/Landing";
 import GroupsModal from "./components/GroupsModal";
 import AdminPanel from "./components/AdminPanel";
 import ProfileSwitcher from "./components/ProfileSwitcher";
@@ -25,6 +26,7 @@ import MarketTrendsCard from "./components/MarketTrendsCard";
 
 export default function App() {
   const [authUser, setAuthUser] = useState(undefined); // undefined=cargando, null=sin sesión, objeto=autenticado
+  const [authView, setAuthView] = useState(null); // null=landing, "login"/"register"=pantalla de acceso
   const [tickers, setTickers] = useState({});
   const [selected, setSelected] = useState("BTCUSDT");
   const [interval, setIntervalVal] = useState("1h");
@@ -266,7 +268,19 @@ export default function App() {
     return <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">Cargando…</div>;
   }
   if (authUser === null) {
-    return <AuthScreen onAuthenticated={setAuthUser} onToast={addToast} />;
+    // Un enlace de reset (?resetToken=) salta directo a la pantalla de acceso.
+    const hasResetToken = new URLSearchParams(window.location.search).has("resetToken");
+    if (authView === null && !hasResetToken) {
+      return <Landing onStart={(mode) => setAuthView(mode)} />;
+    }
+    return (
+      <AuthScreen
+        onAuthenticated={setAuthUser}
+        onToast={addToast}
+        initialMode={authView || "login"}
+        onBack={() => setAuthView(null)}
+      />
+    );
   }
 
   return (
