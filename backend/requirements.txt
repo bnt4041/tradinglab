@@ -6,3 +6,4 @@ numpy==2.2.1
 scikit-learn==1.6.1
 joblib==1.4.2
 websockets==14.1
+aiosmtplib==3.0.2

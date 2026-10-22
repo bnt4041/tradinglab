@@ -51,6 +51,18 @@ DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com/v1")
 DEEPSEEK_KEY_ENV = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL_ENV = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+# ---------------- SMTP (recuperación de contraseña) ----------------
+# Mismo proveedor (IONOS) y cuenta que ya usa Flexómetro en este host:
+# puerto 587 = STARTTLS (texto plano que negocia TLS a mitad de conversación),
+# no confundir con 465 (TLS implícito desde el primer byte) — son protocolos
+# de arranque distintos.
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.ionos.es")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://tradinglab.pirueta.online")
+
 # ---------------- Catálogo de instrumentos ----------------
 # id -> {source, yahoo?, name, category, tier}
 # Para cripto el id es el símbolo de Binance (p.ej. BTCUSDT).

@@ -118,20 +118,53 @@ def is_admin(user_id: int) -> bool:
         return bool(row and row["is_admin"])
 
 
+RESET_TOKEN_HOURS = 1
+
+
 # ---------------- Restablecer contraseña ----------------
-# No hay SMTP configurado en este despliegue, así que no hay email de
-# recuperación: el usuario "solicita" el reset (queda marcado y visible
-# para el admin en /api/admin/users) y el admin le pone una contraseña
-# nueva manualmente, por el canal que sea (WhatsApp, en persona...).
-def request_password_reset(email: str) -> None:
+# Dos vías, no una: un enlace de un solo uso por email (self-service, ver
+# mailer.py) Y una marca visible para el admin en /api/admin/users (en caso
+# de que el envío de correo falle — el SMTP es best-effort, sin cola — el
+# admin sigue pudiendo resetear la contraseña a mano).
+def request_password_reset(email: str) -> str | None:
+    """Si el email existe, marca la solicitud y devuelve un token de un solo
+    uso (1h) para quien llame lo mande por correo. Devuelve None si el email
+    no existe — deliberadamente no se distingue de "token enviado" de cara al
+    usuario (evita enumerar cuentas registradas), eso lo decide la capa de
+    encima."""
     email = (email or "").strip().lower()
     with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM users WHERE email = ? AND password_hash IS NOT NULL", (email,)
+        ).fetchone()
+        if not row:
+            return None
+        now = time.time()
+        conn.execute("UPDATE users SET reset_requested_at = ? WHERE id = ?", (now, row["id"]))
+        token = secrets.token_urlsafe(32)
         conn.execute(
-            "UPDATE users SET reset_requested_at = ? WHERE email = ? AND password_hash IS NOT NULL",
-            (time.time(), email),
+            "INSERT INTO password_resets (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, row["id"], now, now + RESET_TOKEN_HOURS * 3600),
         )
-    # Deliberadamente no informamos si el email existe o no (evita que se
-    # pueda usar este endpoint para enumerar cuentas registradas).
+        return token
+
+
+def reset_password_with_token(token: str, new_password: str) -> None:
+    if len(new_password or "") < 6:
+        raise ValueError("La contraseña debe tener al menos 6 caracteres")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id, expires_at FROM password_resets WHERE token = ?", (token,)
+        ).fetchone()
+        if not row or row["expires_at"] < time.time():
+            raise ValueError("El enlace no es válido o ha caducado. Pide uno nuevo.")
+        user_id = row["user_id"]
+        conn.execute(
+            "UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?",
+            (_hash_password(new_password), user_id),
+        )
+        conn.execute("DELETE FROM password_resets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
 
 def admin_reset_password(user_id: int, new_password: str) -> None:

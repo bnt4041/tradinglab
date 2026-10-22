@@ -1,14 +1,13 @@
 """API FastAPI del emulador de trading (multi-activo + IA local + asesor)."""
 import asyncio
 import contextlib
-import os
 import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import advisor, alerts, assistant, auth, basket, bot, challenges, coach, config, database, external, groups, market, ml, portfolio, trends, users
+from . import advisor, alerts, assistant, auth, basket, bot, challenges, coach, config, database, external, groups, mailer, market, ml, portfolio, trends, users
 
 app = FastAPI(title="Emulador de Trading", version="3.0.0")
 
@@ -19,7 +18,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost", "http://localhost:5173",
-        os.getenv("PUBLIC_ORIGIN", "https://tradinglab.pirueta.online"),
+        config.PUBLIC_ORIGIN,
     ],
     allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
@@ -224,6 +223,11 @@ class ResetRequestRequest(BaseModel):
     email: str
 
 
+class ResetPasswordRequest(BaseModel):
+    token: str
+    newPassword: str
+
+
 class AdminResetPasswordRequest(BaseModel):
     newPassword: str
 
@@ -324,8 +328,27 @@ async def auth_me(user_id: int = Depends(get_user_id)):
 
 @app.post("/api/auth/request-reset")
 async def request_password_reset(req: ResetRequestRequest):
-    auth.request_password_reset(req.email)
+    token = auth.request_password_reset(req.email)
+    if token:
+        user = users.get_user_by_email(req.email)
+        name = (user or {}).get("name", "")
+        reset_url = f"{config.PUBLIC_ORIGIN}/?resetToken={token}"
+        with contextlib.suppress(mailer.MailerError):
+            await mailer.send_email(
+                to=req.email.strip().lower(),
+                subject="TradeLab · Restablecer tu contraseña",
+                html_body=mailer.reset_email_html(name or "", reset_url),
+            )
     # Siempre "ok", exista o no esa cuenta: no revelamos qué emails están registrados.
+    return {"ok": True}
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    try:
+        auth.reset_password_with_token(req.token, req.newPassword)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
 
 
@@ -350,6 +373,22 @@ async def admin_set_admin(target_id: int, req: AdminSetAdminRequest, admin_id: i
         auth.set_admin(target_id, req.isAdmin)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/admin/test-email")
+async def admin_test_email(admin_id: int = Depends(require_admin)):
+    admin_user = users.get_user(admin_id)
+    if not admin_user or not admin_user.get("email"):
+        raise HTTPException(status_code=400, detail="Tu cuenta no tiene email")
+    try:
+        await mailer.send_email(
+            to=admin_user["email"],
+            subject="TradeLab · Correo de prueba",
+            html_body="<p>Si lees esto, el SMTP de TradeLab está bien configurado.</p>",
+        )
+    except mailer.MailerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     return {"ok": True}
 
 

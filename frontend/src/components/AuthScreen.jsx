@@ -1,14 +1,45 @@
-import { useState } from "react";
-import { CandlestickChart, Mail, Lock, User, LogIn, UserPlus, KeyRound, ArrowLeft } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CandlestickChart, Mail, Lock, User, LogIn, UserPlus, KeyRound, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { api } from "../api";
 
+function tokenFromUrl() {
+  return new URLSearchParams(window.location.search).get("resetToken") || "";
+}
+
 export default function AuthScreen({ onAuthenticated, onToast }) {
-  const [mode, setMode] = useState("login"); // login | register | forgot
+  const [mode, setMode] = useState(() => (tokenFromUrl() ? "reset" : "login")); // login | register | forgot | reset
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [resetSent, setResetSent] = useState(false);
+  const [resetToken] = useState(tokenFromUrl);
+  const [newPassword, setNewPassword] = useState("");
+  const [resetDone, setResetDone] = useState(false);
+
+  // Quita el token de la URL en cuanto lo leemos, para que no quede
+  // pegado en el historial del navegador ni se comparta sin querer.
+  useEffect(() => {
+    if (resetToken) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("resetToken");
+      window.history.replaceState({}, "", url);
+    }
+  }, [resetToken]);
+
+  const submitNewPassword = async (e) => {
+    e.preventDefault();
+    if (newPassword.length < 6) return onToast?.("La contraseña debe tener al menos 6 caracteres", "danger");
+    setBusy(true);
+    try {
+      await api.resetPassword(resetToken, newPassword);
+      setResetDone(true);
+    } catch (err) {
+      onToast?.(err.message, "danger");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -42,6 +73,44 @@ export default function AuthScreen({ onAuthenticated, onToast }) {
     }
   };
 
+  if (mode === "reset") {
+    return (
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <div className="w-full max-w-sm">
+          <div className="mb-6 flex flex-col items-center gap-2 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-600 text-white shadow-lift">
+              <KeyRound className="h-7 w-7" />
+            </div>
+            <h1 className="text-xl font-extrabold text-slate-900">Elige una nueva contraseña</h1>
+          </div>
+          <div className="card p-5">
+            {resetDone ? (
+              <div className="space-y-3 text-center">
+                <CheckCircle2 className="mx-auto h-8 w-8 text-up" />
+                <p className="text-sm text-slate-600">Contraseña actualizada. Ya puedes entrar con ella.</p>
+                <button onClick={() => setMode("login")} className="btn-primary w-full !py-2.5">Ir a entrar</button>
+              </div>
+            ) : (
+              <form onSubmit={submitNewPassword} className="space-y-3">
+                <div className="relative">
+                  <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    autoFocus className="input pl-9" type="password" autoComplete="new-password"
+                    placeholder="Nueva contraseña (mín. 6 caracteres)"
+                    value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                </div>
+                <button type="submit" disabled={busy} className="btn-primary w-full !py-2.5">
+                  {busy ? "Un momento…" : "Guardar contraseña"}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (mode === "forgot") {
     return (
       <div className="flex min-h-screen items-center justify-center px-4">
@@ -55,9 +124,8 @@ export default function AuthScreen({ onAuthenticated, onToast }) {
           <div className="card p-5">
             {resetSent ? (
               <p className="text-sm text-slate-600">
-                Si ese email tiene una cuenta, hemos avisado al administrador de que quieres restablecer tu
-                contraseña. En este despliegue no hay envío de correos automático: el admin te pasará una
-                contraseña nueva por otro medio.
+                Si ese email tiene una cuenta, te hemos mandado un enlace para elegir una contraseña nueva.
+                Revisa tu bandeja de entrada (y spam) — caduca en 1 hora.
               </p>
             ) : (
               <form onSubmit={submitForgot} className="space-y-3">

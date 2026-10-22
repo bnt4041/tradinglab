@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS users (
     reset_requested_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS password_resets (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,

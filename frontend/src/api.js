@@ -57,6 +57,8 @@ export const api = {
   logout: () => request("/auth/logout", { method: "POST" }),
   me: () => request("/auth/me"),
   requestPasswordReset: (email) => request("/auth/request-reset", { method: "POST", body: JSON.stringify({ email }) }),
+  resetPassword: (token, newPassword) =>
+    request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, newPassword }) }),
 
   // Administración (solo admin)
   adminUsers: () => request("/admin/users"),
@@ -64,6 +66,7 @@ export const api = {
     request(`/admin/users/${userId}/reset-password`, { method: "POST", body: JSON.stringify({ newPassword }) }),
   adminSetAdmin: (userId, isAdmin) =>
     request(`/admin/users/${userId}/admin`, { method: "POST", body: JSON.stringify({ isAdmin }) }),
+  adminTestEmail: () => request("/admin/test-email", { method: "POST" }),
 
   // Grupos y retos
   groups: () => request("/groups"),

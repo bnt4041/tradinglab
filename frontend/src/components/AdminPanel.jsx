@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X, ShieldCheck, KeyRound, ShieldAlert, Bell } from "lucide-react";
+import { X, ShieldCheck, KeyRound, ShieldAlert, Bell, Mail } from "lucide-react";
 import { api, fmt } from "../api";
 
 export default function AdminPanel({ currentUserId, onClose, onToast }) {
@@ -7,9 +7,18 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
   const [busyId, setBusyId] = useState(null);
   const [resetTarget, setResetTarget] = useState(null); // {id, name}
   const [newPassword, setNewPassword] = useState("");
+  const [testingEmail, setTestingEmail] = useState(false);
 
   const load = () => api.adminUsers().then(setUsers).catch((e) => onToast?.(e.message, "danger"));
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  const testEmail = async () => {
+    setTestingEmail(true);
+    try {
+      await api.adminTestEmail();
+      onToast?.("Correo de prueba enviado a tu email", "success");
+    } catch (e) { onToast?.(e.message, "danger"); } finally { setTestingEmail(false); }
+  };
 
   const toggleAdmin = async (u) => {
     setBusyId(u.id);
@@ -45,6 +54,17 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
         </div>
 
         <div className="overflow-y-auto p-5">
+          <div className="mb-4 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5">
+            <div>
+              <div className="text-xs font-semibold text-slate-700">SMTP (recuperación de contraseña)</div>
+              <div className="text-[11px] text-slate-400">info@flexometro.online · smtp.ionos.es</div>
+            </div>
+            <button onClick={testEmail} disabled={testingEmail}
+              className="flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100">
+              <Mail className="h-3.5 w-3.5" /> {testingEmail ? "Enviando…" : "Enviar prueba"}
+            </button>
+          </div>
+
           <h3 className="card-title mb-2">Usuarios ({users?.length ?? "…"})</h3>
           <p className="mb-3 text-xs text-slate-400">
             La configuración de IA (proveedor y claves) está en Ajustes y solo la puede cambiar un admin.
