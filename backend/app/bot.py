@@ -5,10 +5,15 @@ Estrategia sencilla y transparente (momentum por señal):
 - Vende lo que tenga y cuya señal pase a VENTA.
 - Compra las señales de COMPRA más fuertes (hasta un máximo de posiciones),
   repartiendo el efectivo a partes iguales.
+
+El agente opera en varios PERFILES: su cuenta libre ('free', el benchmark que
+usa "Comparar con el Agente IA") y un perfil por cada reto en que compite. En
+los retos respeta el cupo de movimientos del reto, para competir en igualdad.
 """
 import time
 
-from . import config, database, ml, portfolio, users
+from . import challenges, config, database, ml, portfolio, users
+from .database import FREE_PROFILE, challenge_profile
 
 MAX_POSITIONS = 4
 CASH_USE = 0.95  # % del efectivo a invertir al repartir
@@ -36,14 +41,9 @@ def _notify(bot_id: int, msg: str) -> None:
         )
 
 
-async def run_cycle(prices: dict[str, float]) -> dict:
-    """Ejecuta una ronda diaria del agente. Devuelve un resumen."""
-    bot = users.ensure_bot()
-    bot_id = bot["id"]
-
-    # 1) Señales de la IA para el universo
+async def _signals_for(universe: list[str], prices: dict[str, float]) -> dict:
     signals = {}
-    for sym in BOT_UNIVERSE:
+    for sym in universe:
         price = prices.get(sym)
         if not price:
             continue
@@ -52,51 +52,82 @@ async def run_cycle(prices: dict[str, float]) -> dict:
             signals[sym] = {"signal": pred["signal"], "prob": pred["probabilityUp"], "price": price}
         except Exception:  # noqa: BLE001
             continue
+    return signals
 
-    actions = []
 
-    # 2) Vender posiciones cuya señal sea VENTA
-    held = {p["symbol"]: p["quantity"] for p in portfolio.get_positions(bot_id)}
+def _run_profile(bot_id: int, profile: str, signals: dict, prices: dict[str, float],
+                 trades_left: int | None) -> list[str]:
+    """Aplica la estrategia en un perfil. `trades_left` limita cuántos
+    movimientos puede hacer (None = sin límite, cuenta libre)."""
+    actions: list[str] = []
+
+    def can_trade() -> bool:
+        return trades_left is None or len(actions) < trades_left
+
+    held = {p["symbol"]: p["quantity"] for p in portfolio.get_positions(bot_id, profile=profile)}
     for sym, qty in list(held.items()):
+        if not can_trade():
+            break
         sig = signals.get(sym)
         if sig and sig["signal"] == "VENTA":
             try:
-                portfolio.sell(bot_id, sym, qty, sig["price"], "VENTA", sig["prob"])
+                portfolio.sell(bot_id, sym, qty, sig["price"], "VENTA", sig["prob"], profile=profile)
                 actions.append(f"vendió {sym}")
                 held.pop(sym, None)
             except Exception:  # noqa: BLE001
                 pass
 
-    # 3) Comprar las señales de COMPRA más fuertes que no tenga ya
     slots = MAX_POSITIONS - len(held)
-    if slots > 0:
+    if slots > 0 and can_trade():
         candidates = sorted(
             [(s, d) for s, d in signals.items() if d["signal"] == "COMPRA" and s not in held],
             key=lambda kv: kv[1]["prob"], reverse=True,
         )[:slots]
         if candidates:
-            acc = portfolio.get_account(bot_id)
+            acc = portfolio.get_account(bot_id, profile=profile)
             cash = acc.get("balance", 0) * CASH_USE
             per = cash / len(candidates)
             for sym, d in candidates:
-                if per <= 1:
+                if per <= 1 or not can_trade():
                     break
                 try:
                     qty = per / d["price"]
-                    portfolio.buy(bot_id, sym, qty, d["price"], "COMPRA", d["prob"])
+                    portfolio.buy(bot_id, sym, qty, d["price"], "COMPRA", d["prob"], profile=profile)
                     actions.append(f"compró {sym}")
                 except Exception:  # noqa: BLE001
                     pass
 
-    database.set_setting("bot_last_run", str(time.time()))
-    summary = "No hizo cambios hoy." if not actions else "Operaciones de hoy: " + ", ".join(actions) + "."
-    _notify(bot_id, summary)
-
-    # Instantánea de su valor
     try:
-        s = portfolio.portfolio_summary(bot_id, prices)
-        portfolio.record_snapshot(bot_id, s["equity"], s["balance"], s["positionsValue"])
+        s = portfolio.portfolio_summary(bot_id, prices, profile=profile)
+        portfolio.record_snapshot(bot_id, s["equity"], s["balance"], s["positionsValue"], profile=profile)
     except Exception:  # noqa: BLE001
         pass
+    return actions
 
-    return {"actions": actions, "summary": summary}
+
+async def run_cycle(prices: dict[str, float]) -> dict:
+    """Ejecuta una ronda diaria del agente en todos sus perfiles."""
+    bot = users.ensure_bot()
+    bot_id = bot["id"]
+
+    signals = await _signals_for(BOT_UNIVERSE, prices)
+
+    # Cuenta libre (benchmark, sin límite de movimientos)
+    free_actions = _run_profile(bot_id, FREE_PROFILE, signals, prices, trades_left=None)
+
+    # Un perfil por cada reto activo en que compite, respetando su cupo
+    now = time.time()
+    for ch in challenges.my_active_challenges(bot_id):
+        if ch["end_at"] <= now:
+            continue
+        profile = challenge_profile(ch["id"])
+        used = portfolio.count_trades(bot_id, profile=profile)
+        left = max(0, ch["max_trades"] - used)
+        if left <= 0:
+            continue
+        _run_profile(bot_id, profile, signals, prices, trades_left=left)
+
+    database.set_setting("bot_last_run", str(time.time()))
+    summary = "No hizo cambios hoy." if not free_actions else "Operaciones de hoy: " + ", ".join(free_actions) + "."
+    _notify(bot_id, summary)
+    return {"actions": free_actions, "summary": summary}

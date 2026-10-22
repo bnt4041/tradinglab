@@ -1,82 +1,94 @@
-"""Lógica de simulación de cartera por usuario: operaciones, posiciones,
-P&L y movimientos de efectivo (ingresos/retiros)."""
+"""Lógica de simulación de cartera por usuario y PERFIL: operaciones,
+posiciones, P&L y movimientos de efectivo.
+
+Cada usuario tiene varios perfiles de cartera aislados — 'free' (su cuenta
+libre) y 'challenge:<id>' por cada reto —, así que todas estas funciones
+reciben `profile` (por defecto 'free') y filtran por él. Las notificaciones
+siguen siendo a nivel de usuario (la campana es única), no por perfil."""
 import time
 
 from . import config
-from .database import get_conn
+from .database import FREE_PROFILE, get_conn
 
 
-def get_account(user_id: int) -> dict:
+def get_account(user_id: int, *, profile: str = FREE_PROFILE) -> dict:
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM account WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM account WHERE user_id = ? AND profile = ?", (user_id, profile)
+        ).fetchone()
         return dict(row) if row else {}
 
 
-def get_positions(user_id: int) -> list[dict]:
+def get_positions(user_id: int, *, profile: str = FREE_PROFILE) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM positions WHERE user_id = ? AND quantity > 0 ORDER BY symbol",
-            (user_id,),
+            "SELECT * FROM positions WHERE user_id = ? AND profile = ? AND quantity > 0 ORDER BY symbol",
+            (user_id, profile),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
 def all_held_symbols() -> list[str]:
-    """Símbolos con posición de cualquier usuario (para refrescar precios)."""
+    """Símbolos con posición de cualquier usuario/perfil (para refrescar precios)."""
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT symbol FROM positions WHERE quantity > 0"
-        ).fetchall()
+        rows = conn.execute("SELECT DISTINCT symbol FROM positions WHERE quantity > 0").fetchall()
         return [r["symbol"] for r in rows]
 
 
-def get_trades(user_id: int, limit: int = 100) -> list[dict]:
+def get_trades(user_id: int, limit: int = 100, *, profile: str = FREE_PROFILE) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM trades WHERE user_id = ? ORDER BY ts DESC LIMIT ?",
-            (user_id, limit),
+            "SELECT * FROM trades WHERE user_id = ? AND profile = ? ORDER BY ts DESC LIMIT ?",
+            (user_id, profile, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def get_cash_movements(user_id: int, limit: int = 50) -> list[dict]:
+def count_trades(user_id: int, *, profile: str = FREE_PROFILE) -> int:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) AS c FROM trades WHERE user_id = ? AND profile = ?", (user_id, profile)
+        ).fetchone()["c"]
+
+
+def get_cash_movements(user_id: int, limit: int = 50, *, profile: str = FREE_PROFILE) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM cash_movements WHERE user_id = ? ORDER BY ts DESC LIMIT ?",
-            (user_id, limit),
+            "SELECT * FROM cash_movements WHERE user_id = ? AND profile = ? ORDER BY ts DESC LIMIT ?",
+            (user_id, profile, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def record_snapshot(user_id: int, equity: float, balance: float, positions_value: float) -> None:
+def record_snapshot(user_id: int, equity: float, balance: float, positions_value: float,
+                    *, profile: str = FREE_PROFILE) -> None:
     """Guarda una instantánea del valor de la cartera y poda el histórico."""
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO equity_snapshots (user_id, ts, equity, balance, positions_value) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, time.time(), equity, balance, positions_value),
+            "INSERT INTO equity_snapshots (user_id, profile, ts, equity, balance, positions_value) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, profile, time.time(), equity, balance, positions_value),
         )
-        # Conservar como mucho las últimas 3000 instantáneas por usuario
         conn.execute(
-            "DELETE FROM equity_snapshots WHERE user_id = ? AND id NOT IN "
-            "(SELECT id FROM equity_snapshots WHERE user_id = ? ORDER BY ts DESC LIMIT 3000)",
-            (user_id, user_id),
+            "DELETE FROM equity_snapshots WHERE user_id = ? AND profile = ? AND id NOT IN "
+            "(SELECT id FROM equity_snapshots WHERE user_id = ? AND profile = ? ORDER BY ts DESC LIMIT 3000)",
+            (user_id, profile, user_id, profile),
         )
 
 
-def get_history(user_id: int, limit: int = 2000) -> list[dict]:
+def get_history(user_id: int, limit: int = 2000, *, profile: str = FREE_PROFILE) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT ts, equity, balance, positions_value FROM equity_snapshots "
-            "WHERE user_id = ? ORDER BY ts ASC LIMIT ?",
-            (user_id, limit),
+            "WHERE user_id = ? AND profile = ? ORDER BY ts ASC LIMIT ?",
+            (user_id, profile, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def stats(user_id: int) -> dict:
+def stats(user_id: int, *, profile: str = FREE_PROFILE) -> dict:
     """Estadísticas de operaciones cerradas (P&L realizado)."""
-    trades = get_trades(user_id, limit=1000)
+    trades = get_trades(user_id, limit=1000, profile=profile)
     sells = [t for t in trades if t["side"] == "SELL"]
     sells.sort(key=lambda t: t["ts"])
 
@@ -113,7 +125,8 @@ def _add_notification(conn, user_id, type_, title, message, symbol=""):
 
 
 def buy(user_id: int, symbol: str, quantity: float, price: float,
-        ai_signal: str | None = None, ai_prob: float | None = None) -> dict:
+        ai_signal: str | None = None, ai_prob: float | None = None,
+        *, profile: str = FREE_PROFILE) -> dict:
     if quantity <= 0:
         raise ValueError("La cantidad debe ser mayor que cero")
     cost = quantity * price
@@ -121,7 +134,9 @@ def buy(user_id: int, symbol: str, quantity: float, price: float,
     total = cost + fee
 
     with get_conn() as conn:
-        acc = conn.execute("SELECT balance FROM account WHERE user_id = ?", (user_id,)).fetchone()
+        acc = conn.execute(
+            "SELECT balance FROM account WHERE user_id = ? AND profile = ?", (user_id, profile)
+        ).fetchone()
         balance = acc["balance"]
         if total > balance + 1e-9:
             raise ValueError(
@@ -129,29 +144,30 @@ def buy(user_id: int, symbol: str, quantity: float, price: float,
             )
 
         pos = conn.execute(
-            "SELECT quantity, avg_price FROM positions WHERE user_id = ? AND symbol = ?",
-            (user_id, symbol),
+            "SELECT quantity, avg_price FROM positions WHERE user_id = ? AND profile = ? AND symbol = ?",
+            (user_id, profile, symbol),
         ).fetchone()
         if pos:
             new_qty = pos["quantity"] + quantity
             new_avg = (pos["quantity"] * pos["avg_price"] + cost) / new_qty
             conn.execute(
-                "UPDATE positions SET quantity = ?, avg_price = ? WHERE user_id = ? AND symbol = ?",
-                (new_qty, new_avg, user_id, symbol),
+                "UPDATE positions SET quantity = ?, avg_price = ? WHERE user_id = ? AND profile = ? AND symbol = ?",
+                (new_qty, new_avg, user_id, profile, symbol),
             )
         else:
             conn.execute(
-                "INSERT INTO positions (user_id, symbol, quantity, avg_price) VALUES (?, ?, ?, ?)",
-                (user_id, symbol, quantity, price),
+                "INSERT INTO positions (user_id, profile, symbol, quantity, avg_price) VALUES (?, ?, ?, ?, ?)",
+                (user_id, profile, symbol, quantity, price),
             )
 
         conn.execute(
-            "UPDATE account SET balance = balance - ? WHERE user_id = ?", (total, user_id)
+            "UPDATE account SET balance = balance - ? WHERE user_id = ? AND profile = ?",
+            (total, user_id, profile),
         )
         conn.execute(
-            "INSERT INTO trades (user_id, symbol, side, quantity, price, fee, total, pnl, ts, ai_signal, ai_prob) "
-            "VALUES (?, ?, 'BUY', ?, ?, ?, ?, 0, ?, ?, ?)",
-            (user_id, symbol, quantity, price, fee, total, time.time(), ai_signal, ai_prob),
+            "INSERT INTO trades (user_id, profile, symbol, side, quantity, price, fee, total, pnl, ts, ai_signal, ai_prob) "
+            "VALUES (?, ?, ?, 'BUY', ?, ?, ?, ?, 0, ?, ?, ?)",
+            (user_id, profile, symbol, quantity, price, fee, total, time.time(), ai_signal, ai_prob),
         )
         _add_notification(
             conn, user_id, "success", "Compra ejecutada",
@@ -162,18 +178,17 @@ def buy(user_id: int, symbol: str, quantity: float, price: float,
 
 
 def sell(user_id: int, symbol: str, quantity: float, price: float,
-         ai_signal: str | None = None, ai_prob: float | None = None) -> dict:
+         ai_signal: str | None = None, ai_prob: float | None = None,
+         *, profile: str = FREE_PROFILE) -> dict:
     if quantity <= 0:
         raise ValueError("La cantidad debe ser mayor que cero")
 
     with get_conn() as conn:
         pos = conn.execute(
-            "SELECT quantity, avg_price FROM positions WHERE user_id = ? AND symbol = ?",
-            (user_id, symbol),
+            "SELECT quantity, avg_price FROM positions WHERE user_id = ? AND profile = ? AND symbol = ?",
+            (user_id, profile, symbol),
         ).fetchone()
         held = pos["quantity"] if pos else 0
-        # Tolerancia por redondeo (p. ej. el botón MÁX): si la diferencia es
-        # ínfima respecto a lo que tienes, se vende la posición completa.
         if pos and quantity > held and quantity - held <= held * 1e-4:
             quantity = held
         if not pos or held < quantity - 1e-9:
@@ -188,18 +203,24 @@ def sell(user_id: int, symbol: str, quantity: float, price: float,
 
         new_qty = pos["quantity"] - quantity
         if new_qty <= 1e-9:
-            conn.execute("DELETE FROM positions WHERE user_id = ? AND symbol = ?", (user_id, symbol))
+            conn.execute(
+                "DELETE FROM positions WHERE user_id = ? AND profile = ? AND symbol = ?",
+                (user_id, profile, symbol),
+            )
         else:
             conn.execute(
-                "UPDATE positions SET quantity = ? WHERE user_id = ? AND symbol = ?",
-                (new_qty, user_id, symbol),
+                "UPDATE positions SET quantity = ? WHERE user_id = ? AND profile = ? AND symbol = ?",
+                (new_qty, user_id, profile, symbol),
             )
 
-        conn.execute("UPDATE account SET balance = balance + ? WHERE user_id = ?", (net, user_id))
         conn.execute(
-            "INSERT INTO trades (user_id, symbol, side, quantity, price, fee, total, pnl, ts, ai_signal, ai_prob) "
-            "VALUES (?, ?, 'SELL', ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, symbol, quantity, price, fee, net, pnl, time.time(), ai_signal, ai_prob),
+            "UPDATE account SET balance = balance + ? WHERE user_id = ? AND profile = ?",
+            (net, user_id, profile),
+        )
+        conn.execute(
+            "INSERT INTO trades (user_id, profile, symbol, side, quantity, price, fee, total, pnl, ts, ai_signal, ai_prob) "
+            "VALUES (?, ?, ?, 'SELL', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, profile, symbol, quantity, price, fee, net, pnl, time.time(), ai_signal, ai_prob),
         )
         result_word = "ganancia" if pnl >= 0 else "pérdida"
         _add_notification(
@@ -210,18 +231,18 @@ def sell(user_id: int, symbol: str, quantity: float, price: float,
     return {"ok": True, "symbol": symbol, "quantity": quantity, "price": price, "pnl": pnl}
 
 
-def deposit(user_id: int, amount: float) -> dict:
+def deposit(user_id: int, amount: float, *, profile: str = FREE_PROFILE) -> dict:
     if amount is None or amount <= 0:
         raise ValueError("El importe a ingresar debe ser mayor que cero")
     with get_conn() as conn:
         conn.execute(
             "UPDATE account SET balance = balance + ?, net_contributions = net_contributions + ? "
-            "WHERE user_id = ?",
-            (amount, amount, user_id),
+            "WHERE user_id = ? AND profile = ?",
+            (amount, amount, user_id, profile),
         )
         conn.execute(
-            "INSERT INTO cash_movements (user_id, type, amount, ts) VALUES (?, 'deposit', ?, ?)",
-            (user_id, amount, time.time()),
+            "INSERT INTO cash_movements (user_id, profile, type, amount, ts) VALUES (?, ?, 'deposit', ?, ?)",
+            (user_id, profile, amount, time.time()),
         )
         _add_notification(
             conn, user_id, "success", "Ingreso realizado",
@@ -230,11 +251,13 @@ def deposit(user_id: int, amount: float) -> dict:
     return {"ok": True}
 
 
-def withdraw(user_id: int, amount: float) -> dict:
+def withdraw(user_id: int, amount: float, *, profile: str = FREE_PROFILE) -> dict:
     if amount is None or amount <= 0:
         raise ValueError("El importe a retirar debe ser mayor que cero")
     with get_conn() as conn:
-        acc = conn.execute("SELECT balance FROM account WHERE user_id = ?", (user_id,)).fetchone()
+        acc = conn.execute(
+            "SELECT balance FROM account WHERE user_id = ? AND profile = ?", (user_id, profile)
+        ).fetchone()
         if amount > acc["balance"] + 1e-9:
             raise ValueError(
                 f"No puedes retirar {amount:,.2f} USDT: solo tienes {acc['balance']:,.2f} en efectivo. "
@@ -242,12 +265,12 @@ def withdraw(user_id: int, amount: float) -> dict:
             )
         conn.execute(
             "UPDATE account SET balance = balance - ?, net_contributions = net_contributions - ? "
-            "WHERE user_id = ?",
-            (amount, amount, user_id),
+            "WHERE user_id = ? AND profile = ?",
+            (amount, amount, user_id, profile),
         )
         conn.execute(
-            "INSERT INTO cash_movements (user_id, type, amount, ts) VALUES (?, 'withdraw', ?, ?)",
-            (user_id, amount, time.time()),
+            "INSERT INTO cash_movements (user_id, profile, type, amount, ts) VALUES (?, ?, 'withdraw', ?, ?)",
+            (user_id, profile, amount, time.time()),
         )
         _add_notification(
             conn, user_id, "info", "Retiro realizado",
@@ -256,9 +279,9 @@ def withdraw(user_id: int, amount: float) -> dict:
     return {"ok": True}
 
 
-def portfolio_summary(user_id: int, prices: dict[str, float]) -> dict:
-    acc = get_account(user_id)
-    positions = get_positions(user_id)
+def portfolio_summary(user_id: int, prices: dict[str, float], *, profile: str = FREE_PROFILE) -> dict:
+    acc = get_account(user_id, profile=profile)
+    positions = get_positions(user_id, profile=profile)
     holdings = []
     positions_value = 0.0
     for p in positions:

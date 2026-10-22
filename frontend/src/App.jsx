@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CandlestickChart, GraduationCap, BadgeDollarSign, ShoppingCart, Settings, Trophy } from "lucide-react";
-import { api, AuthError, connectWS, setInstrumentMeta, coinName, instrumentMeta } from "./api";
+import { api, AuthError, connectWS, setInstrumentMeta, coinName, instrumentMeta, getProfile, setProfile } from "./api";
 import Watchlist from "./components/Watchlist";
 import PriceChart from "./components/PriceChart";
 import AIPanel from "./components/AIPanel";
@@ -16,6 +16,7 @@ import ProfileModal from "./components/ProfileModal";
 import AuthScreen from "./components/AuthScreen";
 import GroupsModal from "./components/GroupsModal";
 import AdminPanel from "./components/AdminPanel";
+import ProfileSwitcher from "./components/ProfileSwitcher";
 import CurrencySelector from "./components/CurrencySelector";
 import ChatAssistant from "./components/ChatAssistant";
 import SettingsModal from "./components/SettingsModal";
@@ -44,6 +45,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [profiles, setProfiles] = useState([{ key: "free", name: "Cuenta libre", kind: "free" }]);
+  const [activeProfile, setActiveProfile] = useState(() => getProfile());
 
   // Plegado de cards del dashboard (persistido en localStorage)
   const [collapsed, setCollapsed] = useState(() => {
@@ -92,6 +95,21 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  const loadProfiles = useCallback(() => {
+    return api
+      .profiles()
+      .then((list) => {
+        setProfiles(list);
+        // Si el perfil activo ya no existe (reto en el que ya no estás), vuelve a la cuenta libre.
+        if (!list.some((p) => p.key === getProfile())) {
+          setProfile("free");
+          setActiveProfile("free");
+        }
+        return list;
+      })
+      .catch(() => {});
+  }, []);
+
   // --- Bootstrap: sesión + mercado (una vez) ---
   useEffect(() => {
     if (!localStorage.getItem("tradelab_onboarded")) setShowOnboarding(true);
@@ -127,6 +145,7 @@ export default function App() {
     refreshPortfolio();
     refreshAlerts();
     refreshNotifications();
+    loadProfiles();
 
     const disconnect = connectWS((msg) => {
       setConnected(true);
@@ -163,10 +182,27 @@ export default function App() {
   // --- Sesión ---
   const logout = async () => {
     await api.logout().catch(() => {});
+    setProfile("free");
+    setActiveProfile("free");
     setAuthUser(null);
     setPortfolio(null);
     setConnected(false);
   };
+
+  // --- Perfiles de cartera ---
+  const switchProfile = useCallback((key) => {
+    if (key === getProfile()) return;
+    setProfile(key);          // cabecera X-Profile + localStorage
+    setActiveProfile(key);
+    setPortfolio(null);
+    refreshPortfolio();       // ya usa el nuevo perfil
+  }, [refreshPortfolio]);
+
+  // Entrar en un reto recién creado/unido: recargar perfiles y saltar a él.
+  const enterChallengeProfile = useCallback(async (challengeId) => {
+    await loadProfiles();
+    switchProfile(`challenge:${challengeId}`);
+  }, [loadProfiles, switchProfile]);
 
   const closeOnboarding = () => {
     localStorage.setItem("tradelab_onboarded", "1");
@@ -194,6 +230,8 @@ export default function App() {
   const livePrice = ticker?.price;
   const holding = portfolio?.holdings?.find((h) => h.symbol === selected);
   const currentUser = authUser;
+  const activeProfileObj = profiles.find((p) => p.key === activeProfile);
+  const isFreeProfile = !activeProfileObj || activeProfileObj.kind === "free";
 
   // Crédito que generan las ventas ya puestas en la cesta (para financiar compras)
   const FEE = 0.001;
@@ -239,6 +277,7 @@ export default function App() {
           <span className="hidden items-center gap-1.5 rounded-full border border-warn/20 bg-warn-soft px-3 py-1.5 text-[11px] font-semibold text-warn lg:flex">
             <BadgeDollarSign className="h-3.5 w-3.5" /> Dinero ficticio
           </span>
+          <ProfileSwitcher profiles={profiles} activeKey={activeProfile} onSwitch={switchProfile} />
           <CurrencySelector />
           <button onClick={() => setBasketOpen(true)} className="icon-btn relative h-10 w-10" title="Cesta de órdenes">
             <ShoppingCart className="h-[18px] w-[18px]" />
@@ -264,6 +303,23 @@ export default function App() {
           />
         </div>
       </header>
+
+      {activeProfileObj?.kind === "challenge" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-2.5">
+          <div className="flex items-center gap-2 text-sm text-brand-800">
+            <Trophy className="h-4 w-4 text-brand-600" />
+            <span>
+              Estás operando en el reto <b>{activeProfileObj.name}</b>
+              {activeProfileObj.finished
+                ? " · terminado (solo lectura)"
+                : ` · ${activeProfileObj.tradesUsed}/${activeProfileObj.maxTrades} movimientos usados`}
+            </span>
+          </div>
+          <button onClick={() => switchProfile("free")} className="text-xs font-semibold text-brand-700 hover:underline">
+            Volver a mi cuenta libre
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">
         <div className="flex flex-col gap-3 xl:w-[280px] xl:shrink-0">
@@ -365,6 +421,8 @@ export default function App() {
         <ProfileModal
           user={currentUser}
           portfolio={portfolio}
+          isFree={isFreeProfile}
+          profileName={activeProfileObj?.name}
           onClose={() => setProfileOpen(false)}
           onChanged={refreshPortfolio}
           onToast={addToast}
@@ -375,6 +433,7 @@ export default function App() {
           currentUserId={currentUserId}
           onClose={() => setGroupsOpen(false)}
           onToast={addToast}
+          onEnterChallenge={(challengeId) => { enterChallengeProfile(challengeId); setGroupsOpen(false); }}
         />
       )}
       {adminOpen && currentUser?.isAdmin && (

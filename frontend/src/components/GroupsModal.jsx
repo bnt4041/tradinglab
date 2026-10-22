@@ -4,7 +4,7 @@ import {
 } from "lucide-react";
 import { api, fmt } from "../api";
 
-export default function GroupsModal({ currentUserId, onClose, onToast }) {
+export default function GroupsModal({ currentUserId, onClose, onToast, onEnterChallenge }) {
   const [view, setView] = useState("list"); // list | group | challenge
   const [myGroups, setMyGroups] = useState(null);
   const [groupDetail, setGroupDetail] = useState(null);
@@ -69,21 +69,16 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
       });
       setCName("");
       onToast?.(`Reto "${ch.name}" creado`, "success");
-      openChallenge(ch.id);
+      onEnterChallenge?.(ch.id);  // el creador ya participa: salta a su cartera del reto
     } catch (e) { onToast?.(e.message, "danger"); } finally { setBusy(false); }
   };
 
-  const joinChallenge = async (id, initialBalance) => {
-    const ok = window.confirm(
-      `Al unirte, tu cartera se reinicia a ${fmt.usd(initialBalance)} USDT: se borran tus posiciones y ` +
-      `operaciones actuales (todos los participantes empiezan igual). ¿Continuar?`
-    );
-    if (!ok) return;
+  const joinChallenge = async (id) => {
     setBusy(true);
     try {
       await api.joinChallenge(id);
-      onToast?.("Te has unido al reto — tu cartera se ha reiniciado", "success");
-      openChallenge(id);
+      onToast?.("Te has unido al reto", "success");
+      onEnterChallenge?.(id);  // salta a la cartera nueva del reto
     } catch (e) { onToast?.(e.message, "danger"); } finally { setBusy(false); }
   };
 
@@ -142,7 +137,8 @@ export default function GroupsModal({ currentUserId, onClose, onToast }) {
             <ChallengeView
               detail={challengeDetail}
               currentUserId={currentUserId}
-              onJoin={() => joinChallenge(challengeDetail.challenge.id, challengeDetail.challenge.initial_balance)}
+              onJoin={() => joinChallenge(challengeDetail.challenge.id)}
+              onEnter={() => onEnterChallenge?.(challengeDetail.challenge.id)}
               busy={busy}
             />
           )}
@@ -307,8 +303,8 @@ function GroupView({
             <Bot className="h-4 w-4" /> Que compita también el Agente IA
           </label>
           <p className="text-[11px] text-slate-400">
-            Al unirse a un reto, la cartera de cada participante se reinicia a esta cantidad (se borran sus
-            posiciones y operaciones anteriores) para que todos empiecen en igualdad.
+            Cada participante juega el reto con una cartera nueva de esta cantidad, independiente de su cuenta
+            libre. Así todos empiezan en igualdad y tu práctica normal no se toca.
           </p>
           <button onClick={onCreateChallenge} disabled={busy} className="btn-primary w-full">
             <Plus className="h-4 w-4" /> Crear reto
@@ -319,7 +315,7 @@ function GroupView({
   );
 }
 
-function ChallengeView({ detail, currentUserId, onJoin, busy }) {
+function ChallengeView({ detail, currentUserId, onJoin, onEnter, busy }) {
   const { challenge, ranking, daysLeft, finished, myTradesUsed } = detail;
   const amIn = ranking.some((r) => r.userId === currentUserId);
 
@@ -338,9 +334,15 @@ function ChallengeView({ detail, currentUserId, onJoin, busy }) {
             <Trophy className="h-4 w-4" /> Unirme a este reto
           </button>
           <p className="mt-1.5 text-center text-[11px] text-slate-400">
-            Reinicia tu cartera a {fmt.usd(challenge.initial_balance)} USDT.
+            Juegas con una cartera nueva de {fmt.usd(challenge.initial_balance)} USDT (no toca tu cuenta libre).
           </p>
         </div>
+      )}
+
+      {amIn && !finished && (
+        <button onClick={onEnter} className="btn-primary w-full">
+          <Trophy className="h-4 w-4" /> Operar en mi cartera de este reto
+        </button>
       )}
 
       <div>

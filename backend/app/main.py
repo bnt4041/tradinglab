@@ -43,6 +43,19 @@ def require_admin(user_id: int = Depends(get_user_id)) -> int:
     return user_id
 
 
+def get_profile(request: Request, user_id: int = Depends(get_user_id)) -> str:
+    """Perfil de cartera activo, de la cabecera X-Profile. 'free' (cuenta
+    libre) siempre vale; 'challenge:<id>' solo si el usuario participa en ese
+    reto. Cualquier otra cosa cae a 'free'."""
+    profile = request.headers.get("X-Profile", database.FREE_PROFILE)
+    if profile == database.FREE_PROFILE:
+        return database.FREE_PROFILE
+    cid = challenges.challenge_id_from_profile(profile)
+    if cid is not None and challenges.is_participant(cid, user_id):
+        return profile
+    return database.FREE_PROFILE
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self.active: dict[WebSocket, int | None] = {}
@@ -110,8 +123,8 @@ async def yahoo_loop() -> None:
         await asyncio.sleep(config.YAHOO_POLL_INTERVAL)
 
 
-async def _prices_for_user(user_id: int) -> dict[str, float]:
-    held = [p["symbol"] for p in portfolio.get_positions(user_id)]
+async def _prices_for_user(user_id: int, profile: str = database.FREE_PROFILE) -> dict[str, float]:
+    held = [p["symbol"] for p in portfolio.get_positions(user_id, profile=profile)]
     prices = dict(_latest_prices)
     for sym in held:
         if sym not in prices:
@@ -120,20 +133,20 @@ async def _prices_for_user(user_id: int) -> dict[str, float]:
     return prices
 
 
-async def _snapshot_user(user_id: int) -> dict:
-    prices = await _prices_for_user(user_id)
-    s = portfolio.portfolio_summary(user_id, prices)
-    portfolio.record_snapshot(user_id, s["equity"], s["balance"], s["positionsValue"])
+async def _snapshot_user(user_id: int, profile: str = database.FREE_PROFILE) -> dict:
+    prices = await _prices_for_user(user_id, profile)
+    s = portfolio.portfolio_summary(user_id, prices, profile=profile)
+    portfolio.record_snapshot(user_id, s["equity"], s["balance"], s["positionsValue"], profile=profile)
     return s
 
 
 async def snapshot_loop() -> None:
-    """Guarda periódicamente el valor de la cartera de cada usuario (incl. Agente IA)."""
+    """Guarda periódicamente el valor de cada cartera (cada perfil de cada usuario, incl. Agente IA)."""
     while True:
         await asyncio.sleep(60)
         try:
-            for u in users.list_all_users():
-                await _snapshot_user(u["id"])
+            for uid, profile in database.list_account_keys():
+                await _snapshot_user(uid, profile)
         except Exception as exc:  # noqa: BLE001
             print(f"[snapshot_loop] {exc}")
 
@@ -327,6 +340,25 @@ async def auth_me(user_id: int = Depends(get_user_id)):
     return {"user": _user_public(user_id)}
 
 
+@app.get("/api/profiles")
+async def my_profiles(user_id: int = Depends(get_user_id)):
+    """Perfiles de cartera del usuario: la cuenta libre + un perfil por cada
+    reto en que participa. El frontend construye con esto el selector."""
+    now = time.time()
+    out = [{"key": database.FREE_PROFILE, "name": "Cuenta libre", "kind": "free"}]
+    for ch in challenges.my_active_challenges(user_id):
+        out.append({
+            "key": database.challenge_profile(ch["id"]),
+            "name": ch["name"],
+            "kind": "challenge",
+            "challengeId": ch["id"],
+            "finished": ch["end_at"] <= now,
+            "maxTrades": ch["max_trades"],
+            "tradesUsed": challenges.trades_used(ch["id"], user_id),
+        })
+    return out
+
+
 @app.post("/api/auth/request-reset")
 async def request_password_reset(req: ResetRequestRequest):
     token = auth.request_password_reset(req.email)
@@ -427,9 +459,9 @@ async def group_detail(group_id: int, user_id: int = Depends(get_user_id)):
     }
 
 
-async def _equity_now(uid: int) -> float:
-    prices = await _prices_for_user(uid)
-    return portfolio.portfolio_summary(uid, prices)["equity"]
+async def _equity_now(uid: int, profile: str = database.FREE_PROFILE) -> float:
+    prices = await _prices_for_user(uid, profile)
+    return portfolio.portfolio_summary(uid, prices, profile=profile)["equity"]
 
 
 @app.post("/api/groups/{group_id}/challenges")
@@ -458,9 +490,10 @@ async def challenge_detail(challenge_id: int, user_id: int = Depends(get_user_id
     if not groups.is_member(challenge["group_id"], user_id):
         raise HTTPException(status_code=404, detail="Reto no encontrado")
 
+    profile = database.challenge_profile(challenge_id)
     rows = challenges.participants(challenge_id)
     for r in rows:
-        equity = await _equity_now(r["userId"])
+        equity = await _equity_now(r["userId"], profile)
         start = r["startEquity"] or equity or 1
         r["equity"] = equity
         r["returnPct"] = round(((equity - start) / start) * 100, 2) if start else 0.0
@@ -562,27 +595,27 @@ async def rates():
 
 # ---------------- Cartera ----------------
 @app.get("/api/portfolio")
-async def get_portfolio(user_id: int = Depends(get_user_id)):
-    held = [p["symbol"] for p in portfolio.get_positions(user_id)]
+async def get_portfolio(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    held = [p["symbol"] for p in portfolio.get_positions(user_id, profile=profile)]
     prices = dict(_latest_prices)
     for sym in held:
         if sym not in prices:
             with contextlib.suppress(Exception):
                 prices[sym] = (await market.get_ticker(sym))["price"]
-    return portfolio.portfolio_summary(user_id, prices)
+    return portfolio.portfolio_summary(user_id, prices, profile=profile)
 
 
 @app.get("/api/trades")
-async def get_trades(user_id: int = Depends(get_user_id)):
-    return portfolio.get_trades(user_id)
+async def get_trades(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    return portfolio.get_trades(user_id, profile=profile)
 
 
 @app.get("/api/portfolio/history")
-async def portfolio_history(user_id: int = Depends(get_user_id)):
-    await _snapshot_user(user_id)  # registra el punto actual al abrir
-    snaps = portfolio.get_history(user_id)
+async def portfolio_history(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    await _snapshot_user(user_id, profile)  # registra el punto actual al abrir
+    snaps = portfolio.get_history(user_id, profile=profile)
     points = [{"t": s["ts"], "equity": s["equity"]} for s in snaps]
-    acc = portfolio.get_account(user_id)
+    acc = portfolio.get_account(user_id, profile=profile)
     created = acc.get("created_at", 0)
     net = acc.get("net_contributions", 0)
     # Punto de partida (capital aportado) para que la curva tenga inicio
@@ -592,8 +625,8 @@ async def portfolio_history(user_id: int = Depends(get_user_id)):
 
 
 @app.get("/api/portfolio/stats")
-async def portfolio_stats(user_id: int = Depends(get_user_id)):
-    return portfolio.stats(user_id)
+async def portfolio_stats(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    return portfolio.stats(user_id, profile=profile)
 
 
 def _equity_history(uid: int) -> list[dict]:
@@ -652,19 +685,27 @@ async def bot_run():
 
 
 @app.get("/api/portfolio/evaluation")
-async def portfolio_evaluation(user_id: int = Depends(get_user_id)):
-    prices = await _prices_for_user(user_id)
-    s = portfolio.portfolio_summary(user_id, prices)
+async def portfolio_evaluation(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    prices = await _prices_for_user(user_id, profile)
+    s = portfolio.portfolio_summary(user_id, prices, profile=profile)
     return await coach.evaluate(user_id, s["equity"], s["netContributions"])
 
 
 @app.get("/api/account/movements")
-async def get_movements(user_id: int = Depends(get_user_id)):
-    return portfolio.get_cash_movements(user_id)
+async def get_movements(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    return portfolio.get_cash_movements(user_id, profile=profile)
+
+
+def _require_free(profile: str) -> None:
+    if profile != database.FREE_PROFILE:
+        raise HTTPException(
+            status_code=400,
+            detail="Esto solo se puede hacer en tu cuenta libre, no dentro de un reto.",
+        )
 
 
 @app.post("/api/trade")
-async def trade(req: TradeRequest, user_id: int = Depends(get_user_id)):
+async def trade(req: TradeRequest, user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
     symbol = req.symbol
     try:
         price = _latest_prices.get(symbol) or (await market.get_ticker(symbol))["price"]
@@ -683,15 +724,15 @@ async def trade(req: TradeRequest, user_id: int = Depends(get_user_id)):
     ai_prob = peek["prob"] if peek else None
 
     try:
-        challenges.check_trade_allowed(user_id)
+        challenges.check_trade_allowed(user_id, profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     try:
         if req.side.upper() == "BUY":
-            result = portfolio.buy(user_id, symbol, quantity, price, ai_signal, ai_prob)
+            result = portfolio.buy(user_id, symbol, quantity, price, ai_signal, ai_prob, profile=profile)
         elif req.side.upper() == "SELL":
-            result = portfolio.sell(user_id, symbol, quantity, price, ai_signal, ai_prob)
+            result = portfolio.sell(user_id, symbol, quantity, price, ai_signal, ai_prob, profile=profile)
         else:
             raise ValueError("side debe ser BUY o SELL")
     except ValueError as exc:
@@ -699,38 +740,41 @@ async def trade(req: TradeRequest, user_id: int = Depends(get_user_id)):
 
     await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
     with contextlib.suppress(Exception):
-        await _snapshot_user(user_id)
+        await _snapshot_user(user_id, profile)
     return result
 
 
 @app.post("/api/account/deposit")
-async def deposit(req: CashRequest, user_id: int = Depends(get_user_id)):
+async def deposit(req: CashRequest, user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    _require_free(profile)
     try:
-        res = portfolio.deposit(user_id, req.amount)
+        res = portfolio.deposit(user_id, req.amount, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with contextlib.suppress(Exception):
-        await _snapshot_user(user_id)
+        await _snapshot_user(user_id, profile)
     return res
 
 
 @app.post("/api/account/withdraw")
-async def withdraw(req: CashRequest, user_id: int = Depends(get_user_id)):
+async def withdraw(req: CashRequest, user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    _require_free(profile)
     try:
-        res = portfolio.withdraw(user_id, req.amount)
+        res = portfolio.withdraw(user_id, req.amount, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     with contextlib.suppress(Exception):
-        await _snapshot_user(user_id)
+        await _snapshot_user(user_id, profile)
     return res
 
 
 @app.post("/api/account/reset")
-async def reset_account(user_id: int = Depends(get_user_id)):
-    database.reset_account(user_id)
+async def reset_account(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    _require_free(profile)
+    database.reset_account(user_id, profile=profile)
     await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
     with contextlib.suppress(Exception):
-        await _snapshot_user(user_id)
+        await _snapshot_user(user_id, profile)
     return {"ok": True}
 
 
@@ -859,14 +903,14 @@ async def basket_advice(req: BasketRequest):
 
 
 @app.post("/api/basket/execute")
-async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)):
+async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
     results = []
     # Ejecutamos primero las VENTAS: su efectivo financia las compras de la cesta
     ordered = sorted(req.items, key=lambda it: 0 if it.side.upper() == "SELL" else 1)
     for it in ordered:
         sym = it.symbol
         try:
-            challenges.check_trade_allowed(user_id)
+            challenges.check_trade_allowed(user_id, profile)
             price = _latest_prices.get(sym) or (await market.get_ticker(sym))["price"]
             quantity = it.quantity
             if quantity is None and it.quoteAmount is not None:
@@ -877,9 +921,9 @@ async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)
             ai_s = peek["signal"] if peek else None
             ai_p = peek["prob"] if peek else None
             if it.side.upper() == "BUY":
-                portfolio.buy(user_id, sym, quantity, price, ai_s, ai_p)
+                portfolio.buy(user_id, sym, quantity, price, ai_s, ai_p, profile=profile)
             else:
-                portfolio.sell(user_id, sym, quantity, price, ai_s, ai_p)
+                portfolio.sell(user_id, sym, quantity, price, ai_s, ai_p, profile=profile)
             results.append({"symbol": sym, "side": it.side.upper(), "ok": True})
         except ValueError as exc:
             results.append({"symbol": sym, "side": it.side.upper(), "ok": False, "error": str(exc)})
@@ -888,7 +932,7 @@ async def basket_execute(req: BasketRequest, user_id: int = Depends(get_user_id)
 
     await manager.send_to_user(user_id, {"type": "notification", "unread": alerts.unread_count(user_id), "data": []})
     with contextlib.suppress(Exception):
-        await _snapshot_user(user_id)
+        await _snapshot_user(user_id, profile)
     ok = sum(1 for r in results if r["ok"])
     return {"results": results, "executed": ok, "total": len(results)}
 

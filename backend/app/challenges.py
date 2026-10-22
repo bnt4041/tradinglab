@@ -1,19 +1,28 @@
-"""Retos dentro de un grupo: X días + X movimientos (operaciones), con
-ranking por rentabilidad y la opción de que compita el Agente IA.
+"""Retos dentro de un grupo: X días + X movimientos, con ranking por
+rentabilidad y la opción de que compita el Agente IA.
 
-Simplificación deliberada: un usuario solo puede tener UN reto activo a la
-vez (no puede unirse a otro mientras el actual siga en curso). Así "X
-movimientos" es inequívoco: cuenta las operaciones (trades) que hace desde
-que se unió, sin tener que repartir cada trade entre varios retos
-simultáneos con límites distintos.
+Cada participación es un PERFIL de cartera aislado ('challenge:<id>', ver
+database/portfolio): al unirse se crea una cartera nueva con el saldo inicial
+del reto, sin tocar la cuenta libre ni otros retos. Por eso los movimientos
+se cuentan por perfil y un usuario puede estar en varios retos a la vez (cada
+uno con su propio cupo), cosa que antes no era posible.
 """
 import time
 
-from . import database, groups, users
-from .database import get_conn
+from . import database, groups, portfolio, users
+from .database import challenge_profile, get_conn
 
 MIN_INITIAL_BALANCE = 100
 MAX_INITIAL_BALANCE = 10_000_000
+
+
+def challenge_id_from_profile(profile: str) -> int | None:
+    if not profile or not profile.startswith("challenge:"):
+        return None
+    try:
+        return int(profile.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
 
 
 def create_challenge(
@@ -44,19 +53,12 @@ def create_challenge(
         challenge_id = cur.lastrowid
         row = dict(conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone())
 
-    # El creador se une automáticamente a su propio reto, pero solo si no
-    # está ya metido en otro reto activo (si lo está, el reto se crea para
-    # el grupo igualmente; el creador podrá unirse cuando acabe el suyo).
-    if active_participation(created_by) is None:
-        _join_raw(challenge_id, created_by, initial_balance, row["name"])
+    # El creador se apunta a su propio reto. Ya no hay límite de "un reto a la
+    # vez": cada reto es un perfil aparte con su propio cupo de operaciones.
+    _join_raw(challenge_id, created_by, initial_balance)
     if include_bot:
-        # El Agente IA no cuenta sus trades contra ningún cupo (los hace su
-        # propio ciclo autónomo, ajeno a los retos), así que puede competir
-        # en varios retos a la vez sin la restricción de "uno activo".
-        # También se le resetea la cartera: si no, un bot que ya acumuló
-        # ganancias antes de este reto saldría con ventaja injusta.
         bot = users.ensure_bot()
-        _join_raw(challenge_id, bot["id"], initial_balance, row["name"])
+        _join_raw(challenge_id, bot["id"], initial_balance)
     return row
 
 
@@ -74,7 +76,15 @@ def list_group_challenges(group_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def _join_raw(challenge_id: int, user_id: int, initial_balance: float, challenge_name: str) -> None:
+def is_participant(challenge_id: int, user_id: int) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM challenge_participants WHERE challenge_id = ? AND user_id = ?",
+            (challenge_id, user_id),
+        ).fetchone() is not None
+
+
+def _join_raw(challenge_id: int, user_id: int, initial_balance: float) -> None:
     with get_conn() as conn:
         already = conn.execute(
             "SELECT 1 FROM challenge_participants WHERE challenge_id = ? AND user_id = ?",
@@ -86,27 +96,9 @@ def _join_raw(challenge_id: int, user_id: int, initial_balance: float, challenge
             "INSERT INTO challenge_participants (challenge_id, user_id, joined_at, start_equity) VALUES (?, ?, ?, ?)",
             (challenge_id, user_id, time.time(), initial_balance),
         )
-    # La cartera se reinicia a la cantidad del reto: así la comparación es
-    # justa entre participantes (mismo punto de partida, no solo el mismo %)
-    # y nadie entra con posiciones/operaciones de antes del reto.
-    database.reset_account(
-        user_id, balance=initial_balance,
-        reason=f"Reto «{challenge_name}»: tu cartera empieza con {initial_balance:,.0f} USDT.",
-    )
-
-
-def active_participation(user_id: int) -> dict | None:
-    """El reto activo (no terminado) en el que ya está metido este usuario, si hay alguno."""
-    now = time.time()
-    with get_conn() as conn:
-        row = conn.execute(
-            """SELECT c.*, cp.joined_at AS participant_joined_at FROM challenge_participants cp
-               JOIN challenges c ON c.id = cp.challenge_id
-               WHERE cp.user_id = ? AND c.end_at > ?
-               ORDER BY cp.joined_at DESC LIMIT 1""",
-            (user_id, now),
-        ).fetchone()
-        return dict(row) if row else None
+    # Crea el perfil de cartera del reto con el saldo inicial (no toca la
+    # cuenta libre del usuario).
+    database.create_profile_account(user_id, challenge_profile(challenge_id), initial_balance)
 
 
 def join_challenge(challenge_id: int, user_id: int) -> dict:
@@ -117,36 +109,38 @@ def join_challenge(challenge_id: int, user_id: int) -> dict:
         raise ValueError("Este reto ya ha terminado")
     if not groups.is_member(challenge["group_id"], user_id):
         raise ValueError("No perteneces al grupo de este reto")
-
-    existing = active_participation(user_id)
-    if existing and existing["id"] != challenge_id:
-        raise ValueError(
-            f"Ya estás participando en el reto «{existing['name']}». Termina ese reto antes de unirte a otro."
-        )
-    _join_raw(challenge_id, user_id, challenge["initial_balance"], challenge["name"])
+    _join_raw(challenge_id, user_id, challenge["initial_balance"])
     return challenge
 
 
-def trades_used(challenge_id: int, user_id: int) -> int:
+def my_active_challenges(user_id: int) -> list[dict]:
+    """Retos en los que participa el usuario (para construir sus perfiles)."""
     with get_conn() as conn:
-        part = conn.execute(
-            "SELECT joined_at FROM challenge_participants WHERE challenge_id = ? AND user_id = ?",
-            (challenge_id, user_id),
-        ).fetchone()
-        if not part:
-            return 0
-        return conn.execute(
-            "SELECT COUNT(*) AS c FROM trades WHERE user_id = ? AND ts >= ?",
-            (user_id, part["joined_at"]),
-        ).fetchone()["c"]
+        rows = conn.execute(
+            """SELECT c.*, cp.joined_at AS participant_joined_at FROM challenge_participants cp
+               JOIN challenges c ON c.id = cp.challenge_id
+               WHERE cp.user_id = ? ORDER BY c.end_at DESC""",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
-def check_trade_allowed(user_id: int) -> None:
-    """Lanza ValueError si el usuario ha agotado los movimientos de su reto activo."""
-    challenge = active_participation(user_id)
+def trades_used(challenge_id: int, user_id: int) -> int:
+    return portfolio.count_trades(user_id, profile=challenge_profile(challenge_id))
+
+
+def check_trade_allowed(user_id: int, profile: str) -> None:
+    """Valida un intento de operar en el perfil dado. Solo los perfiles de reto
+    tienen restricciones (reto terminado o cupo de movimientos agotado)."""
+    cid = challenge_id_from_profile(profile)
+    if cid is None:
+        return
+    challenge = get_challenge(cid)
     if not challenge:
         return
-    used = trades_used(challenge["id"], user_id)
+    if challenge["end_at"] <= time.time():
+        raise ValueError(f"El reto «{challenge['name']}» ya ha terminado")
+    used = trades_used(cid, user_id)
     if used >= challenge["max_trades"]:
         raise ValueError(
             f"Has agotado tus {challenge['max_trades']} movimientos en el reto «{challenge['name']}»"

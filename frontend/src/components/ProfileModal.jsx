@@ -3,7 +3,7 @@ import { X, ArrowDownToLine, ArrowUpFromLine, RotateCcw } from "lucide-react";
 import { api, fmt } from "../api";
 import { useCurrency } from "../currency";
 
-export default function ProfileModal({ user, portfolio, onClose, onChanged, onToast }) {
+export default function ProfileModal({ user, portfolio, isFree = true, profileName, onClose, onChanged, onToast }) {
   const { money, toBase, symbol } = useCurrency();
   const [mode, setMode] = useState("deposit");
   const [amount, setAmount] = useState("");
@@ -44,7 +44,9 @@ export default function ProfileModal({ user, portfolio, onClose, onChanged, onTo
             </span>
             <div>
               <h2 className="text-lg font-bold text-slate-900">{user?.name}</h2>
-              <span className="text-xs text-slate-400">Tu perfil de práctica</span>
+              <span className="text-xs text-slate-400">
+                {isFree ? "Cuenta libre de práctica" : `Cartera del reto · ${profileName || ""}`}
+              </span>
             </div>
           </div>
           <button onClick={onClose} className="icon-btn h-8 w-8"><X className="h-4 w-4" /></button>
@@ -60,11 +62,21 @@ export default function ProfileModal({ user, portfolio, onClose, onChanged, onTo
             <Box label="Aportado neto" value={money(portfolio?.netContributions)} />
           </div>
 
-          <p className="mt-2 text-[11px] text-slate-400">
-            El P&L se calcula frente a lo que has <b>aportado neto</b> (ingresos − retiros), así que ingresar o
-            retirar no falsea tus resultados.
-          </p>
+          {isFree && (
+            <p className="mt-2 text-[11px] text-slate-400">
+              El P&L se calcula frente a lo que has <b>aportado neto</b> (ingresos − retiros), así que ingresar o
+              retirar no falsea tus resultados.
+            </p>
+          )}
 
+          {!isFree && (
+            <div className="mt-5 rounded-2xl border border-brand-200 bg-brand-50 p-4 text-xs text-brand-800">
+              Esta es la cartera de un reto: no admite ingresos ni retiros y no se puede reiniciar — todos los
+              participantes juegan con el mismo saldo inicial. Para practicar libremente, cambia a tu cuenta libre.
+            </div>
+          )}
+
+          {isFree && (
           <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <h3 className="card-title mb-3">Ajustar cartera</h3>
             <div className="mb-3 flex gap-1 rounded-xl bg-white p-1 ring-1 ring-slate-200">
@@ -99,6 +111,7 @@ export default function ProfileModal({ user, portfolio, onClose, onChanged, onTo
               ))}
             </div>
           </div>
+          )}
 
           {movements.length > 0 && (
             <div className="mt-5">
@@ -118,11 +131,13 @@ export default function ProfileModal({ user, portfolio, onClose, onChanged, onTo
             </div>
           )}
 
-          <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
-            <button onClick={reset} className="btn-ghost flex-1 text-xs">
-              <RotateCcw className="h-4 w-4" /> Reiniciar cuenta
-            </button>
-          </div>
+          {isFree && (
+            <div className="mt-6 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+              <button onClick={reset} className="btn-ghost flex-1 text-xs">
+                <RotateCcw className="h-4 w-4" /> Reiniciar cuenta
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

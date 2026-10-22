@@ -10,8 +10,29 @@ const BASE = import.meta.env.VITE_API_BASE || "";
 // especial aquí salvo no mandar ya X-User-Id.
 export class AuthError extends Error {}
 
+// --- Perfil de cartera activo ---
+// 'free' (cuenta libre) o 'challenge:<id>'. Se manda en cada petición como
+// cabecera X-Profile; el backend valida que el usuario pertenezca al reto.
+let _profile = "free";
+try {
+  _profile = localStorage.getItem("tradelab_profile") || "free";
+} catch (_) {}
+export function getProfile() {
+  return _profile;
+}
+export function setProfile(key) {
+  _profile = key || "free";
+  try {
+    localStorage.setItem("tradelab_profile", _profile);
+  } catch (_) {}
+}
+
 async function request(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Profile": _profile,
+    ...(options.headers || {}),
+  };
   const res = await fetch(`${BASE}/api${path}`, { ...options, headers });
   if (!res.ok) {
     let detail = `Error ${res.status}`;
@@ -67,6 +88,9 @@ export const api = {
   adminSetAdmin: (userId, isAdmin) =>
     request(`/admin/users/${userId}/admin`, { method: "POST", body: JSON.stringify({ isAdmin }) }),
   adminTestEmail: () => request("/admin/test-email", { method: "POST" }),
+
+  // Perfiles de cartera (cuenta libre + un perfil por reto)
+  profiles: () => request("/profiles"),
 
   // Grupos y retos
   groups: () => request("/groups"),

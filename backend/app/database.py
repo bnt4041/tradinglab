@@ -14,6 +14,14 @@ from . import config
 
 _lock = threading.Lock()
 
+# Perfil de la cuenta libre de práctica. Los retos usan 'challenge:<id>'.
+FREE_PROFILE = "free"
+
+
+def challenge_profile(challenge_id: int) -> str:
+    return f"challenge:{challenge_id}"
+
+
 USER_COLORS = [
     "#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4",
     "#a855f7", "#ef4444", "#14b8a6", "#f97316", "#3b82f6",
@@ -122,24 +130,32 @@ CREATE TABLE IF NOT EXISTS challenge_participants (
     PRIMARY KEY (challenge_id, user_id)
 );
 
+-- Cada cuenta de usuario tiene varios PERFILES de cartera: 'free' (la cuenta
+-- libre de práctica) y 'challenge:<id>' (una cartera aislada por cada reto en
+-- el que participa). Posiciones, operaciones y saldo son independientes por
+-- perfil, así que entrar en un reto no toca tu cuenta libre.
 CREATE TABLE IF NOT EXISTS account (
-    user_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL DEFAULT 'free',
     balance REAL NOT NULL,
     net_contributions REAL NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    PRIMARY KEY (user_id, profile)
 );
 
 CREATE TABLE IF NOT EXISTS positions (
     user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL DEFAULT 'free',
     symbol TEXT NOT NULL,
     quantity REAL NOT NULL,
     avg_price REAL NOT NULL,
-    PRIMARY KEY (user_id, symbol)
+    PRIMARY KEY (user_id, profile, symbol)
 );
 
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL DEFAULT 'free',
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     quantity REAL NOT NULL,
@@ -176,6 +192,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS cash_movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL DEFAULT 'free',
     type TEXT NOT NULL,            -- deposit | withdraw
     amount REAL NOT NULL,
     ts REAL NOT NULL
@@ -184,12 +201,12 @@ CREATE TABLE IF NOT EXISTS cash_movements (
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL DEFAULT 'free',
     ts REAL NOT NULL,
     equity REAL NOT NULL,
     balance REAL NOT NULL,
     positions_value REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_snap_user_ts ON equity_snapshots(user_id, ts);
 
 CREATE TABLE IF NOT EXISTS ai_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -259,6 +276,59 @@ def _migrate_v1_to_v2(conn) -> None:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
 
 
+def _migrate_add_profiles(conn) -> None:
+    """Añade la columna `profile` a las tablas de cartera (perfiles por reto).
+
+    `account` y `positions` se reconstruyen porque su clave primaria tiene que
+    incluir el perfil (SQLite no permite cambiar la PK con ALTER); el resto
+    basta con ADD COLUMN. Todo lo existente queda bajo el perfil 'free'.
+    """
+    if _table_exists(conn, "account") and "profile" not in _columns(conn, "account"):
+        conn.execute("ALTER TABLE account RENAME TO account_old")
+        conn.execute(
+            """CREATE TABLE account (
+                user_id INTEGER NOT NULL,
+                profile TEXT NOT NULL DEFAULT 'free',
+                balance REAL NOT NULL,
+                net_contributions REAL NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (user_id, profile)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO account (user_id, profile, balance, net_contributions, created_at) "
+            "SELECT user_id, 'free', balance, net_contributions, created_at FROM account_old"
+        )
+        conn.execute("DROP TABLE account_old")
+
+    if _table_exists(conn, "positions") and "profile" not in _columns(conn, "positions"):
+        conn.execute("ALTER TABLE positions RENAME TO positions_old")
+        conn.execute(
+            """CREATE TABLE positions (
+                user_id INTEGER NOT NULL,
+                profile TEXT NOT NULL DEFAULT 'free',
+                symbol TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                avg_price REAL NOT NULL,
+                PRIMARY KEY (user_id, profile, symbol)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO positions (user_id, profile, symbol, quantity, avg_price) "
+            "SELECT user_id, 'free', symbol, quantity, avg_price FROM positions_old"
+        )
+        conn.execute("DROP TABLE positions_old")
+
+    for tbl in ("trades", "cash_movements", "equity_snapshots"):
+        if _table_exists(conn, tbl) and "profile" not in _columns(conn, tbl):
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN profile TEXT NOT NULL DEFAULT 'free'")
+
+    # Índices que referencian `profile` — se crean aquí (no en SCHEMA) porque la
+    # columna puede acabar de añadirse justo arriba en una base de datos ya existente.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_profile ON trades(user_id, profile, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snap_user_ts ON equity_snapshots(user_id, profile, ts)")
+
+
 def init_db() -> None:
     with get_conn() as conn:
         needs_migration = _table_exists(conn, "account") and "user_id" not in _columns(
@@ -270,6 +340,8 @@ def init_db() -> None:
 
         if needs_migration:
             _migrate_v1_to_v2(conn)
+
+        _migrate_add_profiles(conn)
 
         # Columnas para registrar la señal de la IA en el momento de operar
         trade_cols = _columns(conn, "trades")
@@ -342,38 +414,62 @@ def get_ai_log(limit: int = 50) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def _ensure_account(conn, user_id: int) -> None:
+def _ensure_account(conn, user_id: int, profile: str = FREE_PROFILE, balance: float | None = None) -> None:
+    amount = config.INITIAL_BALANCE if balance is None else balance
     row = conn.execute(
-        "SELECT user_id FROM account WHERE user_id = ?", (user_id,)
+        "SELECT 1 FROM account WHERE user_id = ? AND profile = ?", (user_id, profile)
     ).fetchone()
     if row is None:
         now = time.time()
         conn.execute(
-            "INSERT INTO account (user_id, balance, net_contributions, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, config.INITIAL_BALANCE, config.INITIAL_BALANCE, now),
+            "INSERT INTO account (user_id, profile, balance, net_contributions, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, profile, amount, amount, now),
         )
+        if profile == FREE_PROFILE:
+            conn.execute(
+                "INSERT INTO notifications (user_id, type, title, message, symbol, read, created_at) "
+                "VALUES (?, 'info', '¡Bienvenido!', ?, '', 0, ?)",
+                (user_id, f"Tu cuenta demo empieza con {amount:,.0f} USDT ficticios. ¡A practicar!", now),
+            )
+
+
+def create_profile_account(user_id: int, profile: str, balance: float) -> None:
+    """Crea (o reinicia) el perfil de cartera de un reto con el saldo inicial.
+
+    Al unirse a un reto se parte de cero en ese perfil, sin tocar la cuenta
+    libre ni ningún otro reto."""
+    with get_conn() as conn:
+        now = time.time()
+        conn.execute("DELETE FROM positions WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM trades WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM cash_movements WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM equity_snapshots WHERE user_id = ? AND profile = ?", (user_id, profile))
         conn.execute(
-            "INSERT INTO notifications (user_id, type, title, message, symbol, read, created_at) "
-            "VALUES (?, 'info', '¡Bienvenido!', ?, '', 0, ?)",
-            (
-                user_id,
-                f"Tu cuenta demo empieza con {config.INITIAL_BALANCE:,.0f} USDT ficticios. ¡A practicar!",
-                now,
-            ),
+            "INSERT INTO account (user_id, profile, balance, net_contributions, created_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, profile) DO UPDATE SET balance = excluded.balance, "
+            "net_contributions = excluded.net_contributions, created_at = excluded.created_at",
+            (user_id, profile, balance, balance, now),
         )
 
 
-def reset_account(user_id: int, balance: float | None = None, reason: str | None = None) -> None:
+def list_account_keys() -> list[tuple[int, str]]:
+    """Todas las parejas (user_id, perfil) con cartera — para el snapshot periódico."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT user_id, profile FROM account").fetchall()
+        return [(r["user_id"], r["profile"]) for r in rows]
+
+
+def reset_account(user_id: int, profile: str = FREE_PROFILE, balance: float | None = None, reason: str | None = None) -> None:
     amount = config.INITIAL_BALANCE if balance is None else balance
     with get_conn() as conn:
         now = time.time()
-        conn.execute("DELETE FROM positions WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM trades WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM cash_movements WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM equity_snapshots WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM positions WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM trades WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM cash_movements WHERE user_id = ? AND profile = ?", (user_id, profile))
+        conn.execute("DELETE FROM equity_snapshots WHERE user_id = ? AND profile = ?", (user_id, profile))
         conn.execute(
-            "UPDATE account SET balance = ?, net_contributions = ?, created_at = ? WHERE user_id = ?",
-            (amount, amount, now, user_id),
+            "UPDATE account SET balance = ?, net_contributions = ?, created_at = ? WHERE user_id = ? AND profile = ?",
+            (amount, amount, now, user_id, profile),
         )
         message = reason or f"Tu cuenta demo se ha reiniciado a {amount:,.0f} USDT."
         conn.execute(
