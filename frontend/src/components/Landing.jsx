@@ -1,7 +1,9 @@
+import { useState } from "react";
 import {
   CandlestickChart, BadgeDollarSign, LineChart, Sparkles, Trophy, Wallet,
-  GraduationCap, Globe, Bot, ArrowRight, Check, ShieldCheck,
+  GraduationCap, Globe, Bot, ArrowRight, Check, ShieldCheck, PlayCircle,
 } from "lucide-react";
+import InteractiveDemo from "./InteractiveDemo";
 
 const FEATURES = [
   { icon: LineChart, title: "Datos de mercado reales", desc: "Cripto en vivo (Binance) y acciones, índices y materias primas (Yahoo Finance). Precios de verdad, dinero ficticio." },
@@ -19,8 +21,10 @@ const STEPS = [
 ];
 
 export default function Landing({ onStart }) {
+  const [demoOpen, setDemoOpen] = useState(false);
   return (
     <div className="min-h-screen">
+      {demoOpen && <InteractiveDemo onClose={() => setDemoOpen(false)} onStart={() => onStart("register")} />}
       {/* Barra superior */}
       <header className="mx-auto flex max-w-6xl items-center justify-between px-5 py-5">
         <div className="flex items-center gap-2.5">
@@ -52,7 +56,9 @@ export default function Landing({ onStart }) {
             <button onClick={() => onStart("register")} className="btn-primary !px-5 !py-3 text-base">
               Empezar gratis <ArrowRight className="h-4 w-4" />
             </button>
-            <button onClick={() => onStart("login")} className="btn-ghost !px-5 !py-3 text-base">Ya tengo cuenta</button>
+            <button onClick={() => setDemoOpen(true)} className="btn-ghost !px-5 !py-3 text-base">
+              <PlayCircle className="h-4 w-4" /> Ver cómo funciona
+            </button>
           </div>
           <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-400">
             <span className="flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-up" /> Sin tarjeta</span>
@@ -131,6 +137,11 @@ export default function Landing({ onStart }) {
               </div>
             </div>
           ))}
+        </div>
+        <div className="mt-6 text-center">
+          <button onClick={() => setDemoOpen(true)} className="btn-ghost !px-5 !py-2.5 text-sm">
+            <PlayCircle className="h-4 w-4" /> Ver el panel por dentro (tour interactivo)
+          </button>
         </div>
       </section>
 

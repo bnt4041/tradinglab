@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { X, ShieldCheck, KeyRound, ShieldAlert, Bell, Mail } from "lucide-react";
+import { X, ShieldCheck, KeyRound, ShieldAlert, Bell, Mail, ChevronDown, Sparkles, Clock, LogIn } from "lucide-react";
 import { api, fmt } from "../api";
+
+const METHOD_LABEL = { password: "Contraseña", google: "Google", register: "Registro" };
+const AI_KIND_LABEL = { chat: "Asistente", coach: "Coach", test: "Prueba", basket: "Cesta" };
+const fmtDateTime = (ts) =>
+  ts ? new Date(ts * 1000).toLocaleString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 
 export default function AdminPanel({ currentUserId, onClose, onToast }) {
   const [users, setUsers] = useState(null);
@@ -8,9 +13,22 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
   const [resetTarget, setResetTarget] = useState(null); // {id, name}
   const [newPassword, setNewPassword] = useState("");
   const [testingEmail, setTestingEmail] = useState(false);
+  const [expanded, setExpanded] = useState(null);     // id del usuario desplegado
+  const [activity, setActivity] = useState({});       // {userId: datos}
 
   const load = () => api.adminUsers().then(setUsers).catch((e) => onToast?.(e.message, "danger"));
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  const toggleActivity = async (u) => {
+    if (expanded === u.id) { setExpanded(null); return; }
+    setExpanded(u.id);
+    if (!activity[u.id]) {
+      try {
+        const d = await api.adminUserActivity(u.id);
+        setActivity((a) => ({ ...a, [u.id]: d }));
+      } catch (e) { onToast?.(e.message, "danger"); }
+    }
+  };
 
   const testEmail = async () => {
     setTestingEmail(true);
@@ -98,10 +116,17 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
                     </div>
                     <div className="num shrink-0 text-right text-xs text-slate-500">
                       <div>{fmt.usd(u.balance)} USDT</div>
-                      <div className="text-[10px] text-slate-400">{u.tradeCount} operaciones</div>
+                      <div className="text-[10px] text-slate-400">{u.tradeCount} ops · {u.aiCalls} IA</div>
+                      <div className="text-[10px] text-slate-400">último acceso: {fmtDateTime(u.lastAccess)}</div>
                     </div>
                   </div>
-                  <div className="mt-2 flex gap-1.5">
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => toggleActivity(u)}
+                      className="flex items-center gap-1 rounded-lg bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100"
+                    >
+                      <ChevronDown className={`h-3 w-3 transition ${expanded === u.id ? "rotate-180" : ""}`} /> Actividad
+                    </button>
                     <button
                       onClick={() => openReset(u)}
                       disabled={busyId === u.id}
@@ -119,6 +144,10 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
                       </button>
                     )}
                   </div>
+
+                  {expanded === u.id && (
+                    <ActivityDetail data={activity[u.id]} />
+                  )}
                 </div>
               ))}
             </div>
@@ -146,6 +175,68 @@ export default function AdminPanel({ currentUserId, onClose, onToast }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ActivityDetail({ data }) {
+  if (!data) return <div className="mt-2 py-2 text-center text-[11px] text-slate-400">Cargando actividad…</div>;
+  const ai = data.ai || {};
+  const kinds = Object.entries(ai.byKind || {});
+  return (
+    <div className="mt-2 grid gap-3 rounded-xl border border-slate-100 bg-white p-3 sm:grid-cols-2">
+      {/* Uso de la IA */}
+      <div>
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          <Sparkles className="h-3.5 w-3.5 text-brand-500" /> Uso de la IA
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+          <Stat label="Llamadas" value={ai.total ?? 0} />
+          <Stat label="Correctas" value={`${ai.ok ?? 0}/${ai.total ?? 0}`} />
+          <Stat label="Latencia media" value={ai.avgMs != null ? `${(ai.avgMs / 1000).toFixed(1)} s` : "—"} />
+          <Stat label="Operaciones con IA" value={ai.aiTrades ?? 0} />
+        </div>
+        {kinds.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {kinds.map(([k, n]) => (
+              <span key={k} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                {AI_KIND_LABEL[k] || k}: <b>{n}</b>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="mt-1.5 text-[10px] text-slate-400">Último uso: {fmtDateTime(ai.lastTs)}</div>
+      </div>
+
+      {/* Accesos */}
+      <div>
+        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          <Clock className="h-3.5 w-3.5 text-brand-500" /> Accesos ({data.accessTotal ?? 0})
+        </div>
+        {(!data.accesses || data.accesses.length === 0) ? (
+          <div className="text-[11px] text-slate-400">Sin accesos registrados todavía.</div>
+        ) : (
+          <div className="max-h-32 space-y-1 overflow-y-auto">
+            {data.accesses.map((a, i) => (
+              <div key={i} className="flex items-center justify-between rounded-md bg-slate-50 px-2 py-1 text-[11px]">
+                <span className="flex items-center gap-1 text-slate-500">
+                  <LogIn className="h-3 w-3" /> {METHOD_LABEL[a.method] || a.method}
+                </span>
+                <span className="num text-slate-400">{fmtDateTime(a.ts)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div className="rounded-md bg-slate-50 px-2 py-1">
+      <div className="text-[9px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="num font-bold text-slate-700">{value}</div>
     </div>
   );
 }

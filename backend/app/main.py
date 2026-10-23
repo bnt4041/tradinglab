@@ -320,6 +320,7 @@ async def register(req: RegisterRequest, response: Response):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     token = auth.create_session(user["id"])
+    database.log_access(user["id"], "register")
     _set_session_cookie(response, token)
     return {"user": _user_public(user["id"])}
 
@@ -331,6 +332,7 @@ async def login(req: LoginRequest, response: Response):
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     token = auth.create_session(user["id"])
+    database.log_access(user["id"], "password")
     _set_session_cookie(response, token)
     return {"user": _user_public(user["id"])}
 
@@ -465,6 +467,7 @@ async def google_callback(request: Request, code: str | None = None, state: str 
         return fail("google")
 
     token = auth.create_session(user["id"])
+    database.log_access(user["id"], "google")
     resp = RedirectResponse(f"{config.PUBLIC_ORIGIN}/", status_code=302)
     _set_session_cookie(resp, token)
     resp.delete_cookie(OAUTH_STATE_COOKIE, path="/")
@@ -493,6 +496,11 @@ async def admin_set_admin(target_id: int, req: AdminSetAdminRequest, admin_id: i
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+@app.get("/api/admin/users/{target_id}/activity")
+async def admin_user_activity(target_id: int, admin_id: int = Depends(require_admin)):
+    return database.user_activity(target_id)
 
 
 @app.post("/api/admin/test-email")
@@ -797,6 +805,7 @@ async def bot_run():
 
 @app.get("/api/portfolio/evaluation")
 async def portfolio_evaluation(user_id: int = Depends(get_user_id), profile: str = Depends(get_profile)):
+    assistant.current_user.set(user_id)
     prices = await _prices_for_user(user_id, profile)
     s = portfolio.portfolio_summary(user_id, prices, profile=profile)
     return await coach.evaluate(user_id, s["equity"], s["netContributions"])
@@ -934,7 +943,8 @@ async def assistant_status():
 
 
 @app.post("/api/assistant/chat")
-async def assistant_chat(req: ChatRequest):
+async def assistant_chat(req: ChatRequest, user_id: int = Depends(get_user_id)):
+    assistant.current_user.set(user_id)
     msgs = [{"role": m.role, "content": m.content} for m in req.messages]
     return await assistant.chat(msgs, req.context)
 
@@ -996,7 +1006,8 @@ async def _notional(symbol: str, side: str, quantity: float | None, quote: float
 
 
 @app.post("/api/basket/advice")
-async def basket_advice(req: BasketRequest):
+async def basket_advice(req: BasketRequest, user_id: int = Depends(get_user_id)):
+    assistant.current_user.set(user_id)
     items = []
     for it in req.items:
         sym = it.symbol

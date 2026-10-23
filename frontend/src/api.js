@@ -87,6 +87,7 @@ export const api = {
     request(`/admin/users/${userId}/reset-password`, { method: "POST", body: JSON.stringify({ newPassword }) }),
   adminSetAdmin: (userId, isAdmin) =>
     request(`/admin/users/${userId}/admin`, { method: "POST", body: JSON.stringify({ isAdmin }) }),
+  adminUserActivity: (userId) => request(`/admin/users/${userId}/activity`),
   adminTestEmail: () => request("/admin/test-email", { method: "POST" }),
 
   // Perfiles de cartera (cuenta libre + un perfil por reto)

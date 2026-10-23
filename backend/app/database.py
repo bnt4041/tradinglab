@@ -222,8 +222,17 @@ CREATE TABLE IF NOT EXISTS ai_log (
     kind TEXT NOT NULL,            -- chat | coach | test | basket
     ok INTEGER NOT NULL,
     latency_ms INTEGER,
-    error TEXT
+    error TEXT,
+    user_id INTEGER               -- quién originó la llamada (NULL = sistema)
 );
+
+CREATE TABLE IF NOT EXISTS access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    method TEXT NOT NULL           -- password | google | register
+);
+CREATE INDEX IF NOT EXISTS idx_access_log_user ON access_log(user_id, ts);
 """
 
 
@@ -407,6 +416,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN reset_requested_at REAL")
         if "google_sub" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
+        if _table_exists(conn, "ai_log") and "user_id" not in _columns(conn, "ai_log"):
+            conn.execute("ALTER TABLE ai_log ADD COLUMN user_id INTEGER")
+        # El índice se crea aquí (no en SCHEMA) porque la columna puede acabar
+        # de añadirse arriba en una base de datos ya existente.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_log_user ON ai_log(user_id)")
         if _table_exists(conn, "challenges") and "initial_balance" not in _columns(conn, "challenges"):
             conn.execute("ALTER TABLE challenges ADD COLUMN initial_balance REAL NOT NULL DEFAULT 10000")
 
@@ -442,14 +456,15 @@ def set_setting(key: str, value: str) -> None:
         )
 
 
-def log_ai(provider: str, model: str, kind: str, ok: bool, latency_ms: int, error: str | None) -> None:
+def log_ai(provider: str, model: str, kind: str, ok: bool, latency_ms: int, error: str | None,
+           user_id: int | None = None) -> None:
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO ai_log (ts, provider, model, kind, ok, latency_ms, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), provider, model, kind, 1 if ok else 0, latency_ms, (error or "")[:300]),
+            "INSERT INTO ai_log (ts, provider, model, kind, ok, latency_ms, error, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), provider, model, kind, 1 if ok else 0, latency_ms, (error or "")[:300], user_id),
         )
         conn.execute(
-            "DELETE FROM ai_log WHERE id NOT IN (SELECT id FROM ai_log ORDER BY ts DESC LIMIT 200)"
+            "DELETE FROM ai_log WHERE id NOT IN (SELECT id FROM ai_log ORDER BY ts DESC LIMIT 1000)"
         )
 
 
@@ -459,6 +474,62 @@ def get_ai_log(limit: int = 50) -> list[dict]:
             "SELECT * FROM ai_log ORDER BY ts DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def log_access(user_id: int, method: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO access_log (user_id, ts, method) VALUES (?, ?, ?)",
+            (user_id, time.time(), method),
+        )
+        # Conservar como mucho los últimos 100 accesos por usuario.
+        conn.execute(
+            "DELETE FROM access_log WHERE user_id = ? AND id NOT IN "
+            "(SELECT id FROM access_log WHERE user_id = ? ORDER BY ts DESC LIMIT 100)",
+            (user_id, user_id),
+        )
+
+
+def user_activity(user_id: int, access_limit: int = 15) -> dict:
+    """Uso de IA y registro de accesos de un usuario (para el panel de admin)."""
+    with get_conn() as conn:
+        ai_rows = conn.execute(
+            "SELECT kind, ok, latency_ms, ts FROM ai_log WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        by_kind: dict[str, int] = {}
+        ok_n = sum_lat = 0
+        last_ai = None
+        for r in ai_rows:
+            by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+            if r["ok"]:
+                ok_n += 1
+                sum_lat += r["latency_ms"] or 0
+            last_ai = max(last_ai or 0, r["ts"])
+        ai_trades = conn.execute(
+            "SELECT COUNT(*) AS c FROM trades WHERE user_id = ? AND ai_signal IS NOT NULL", (user_id,)
+        ).fetchone()["c"]
+
+        access_rows = conn.execute(
+            "SELECT ts, method FROM access_log WHERE user_id = ? ORDER BY ts DESC LIMIT ?",
+            (user_id, access_limit),
+        ).fetchall()
+        total_access = conn.execute(
+            "SELECT COUNT(*) AS c, MAX(ts) AS last FROM access_log WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+        return {
+            "ai": {
+                "total": len(ai_rows),
+                "ok": ok_n,
+                "byKind": by_kind,
+                "avgMs": round(sum_lat / ok_n) if ok_n else None,
+                "lastTs": last_ai,
+                "aiTrades": ai_trades,
+            },
+            "accesses": [dict(r) for r in access_rows],
+            "accessTotal": total_access["c"],
+            "lastAccess": total_access["last"],
+        }
 
 
 def _ensure_account(conn, user_id: int, profile: str = FREE_PROFILE, balance: float | None = None) -> None:

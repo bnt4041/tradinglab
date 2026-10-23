@@ -244,11 +244,19 @@ def list_accounts() -> list[dict]:
             trades = conn.execute(
                 "SELECT COUNT(*) AS c, MAX(ts) AS last_ts FROM trades WHERE user_id = ?", (r["id"],)
             ).fetchone()
+            last_access = conn.execute(
+                "SELECT MAX(ts) AS last FROM access_log WHERE user_id = ?", (r["id"],)
+            ).fetchone()["last"]
+            ai_calls = conn.execute(
+                "SELECT COUNT(*) AS c FROM ai_log WHERE user_id = ?", (r["id"],)
+            ).fetchone()["c"]
             out.append({
                 "id": r["id"], "name": r["name"], "email": r["email"], "color": r["color"],
                 "isAdmin": bool(r["is_admin"]), "createdAt": r["created_at"],
+                "hasGoogle": bool(r["google_sub"]),
                 "balance": r["balance"], "netContributions": r["net_contributions"],
                 "tradeCount": trades["c"], "lastTradeAt": trades["last_ts"],
+                "lastAccess": last_access, "aiCalls": ai_calls,
                 "resetRequestedAt": r["reset_requested_at"],
             })
         return out

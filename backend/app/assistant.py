@@ -8,11 +8,16 @@ Si el LLM elegido no está disponible, se responde con una base de conocimiento
 integrada, de modo que el asistente SIEMPRE funciona.
 """
 import asyncio
+import contextvars
 import time
 
 import httpx
 
 from . import config, database
+
+# Usuario que originó la llamada a la IA (lo fija el endpoint); se usa para
+# atribuir el uso de IA en el panel de admin. None = sistema/anónimo.
+current_user: contextvars.ContextVar[int | None] = contextvars.ContextVar("ai_user", default=None)
 
 _pull_task: asyncio.Task | None = None
 _pull_state = "unknown"  # unknown | downloading | ready | unavailable
@@ -335,7 +340,7 @@ async def _run(messages: list[dict], num_predict: int, temperature: float, kind:
         err = str(exc)
     latency = int((time.time() - t0) * 1000)
     try:
-        database.log_ai(provider, model, kind, ok, latency, err)
+        database.log_ai(provider, model, kind, ok, latency, err, user_id=current_user.get())
     except Exception:  # noqa: BLE001
         pass
     return {"text": text, "ok": ok, "latencyMs": latency, "error": err, "provider": provider, "model": model}
@@ -357,7 +362,7 @@ async def _run_with_fallback(messages: list[dict], num_predict: int, temperature
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
         try:
-            database.log_ai("local", config.OLLAMA_MODEL, kind + "-fallback", ok, int((time.time() - t0) * 1000), err)
+            database.log_ai("local", config.OLLAMA_MODEL, kind + "-fallback", ok, int((time.time() - t0) * 1000), err, user_id=current_user.get())
         except Exception:  # noqa: BLE001
             pass
         return text
