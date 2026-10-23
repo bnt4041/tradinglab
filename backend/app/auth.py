@@ -55,7 +55,7 @@ def register(name: str, email: str, password: str) -> dict:
         # La primera cuenta real que se registra en la instancia es la admin
         # (no hay nadie más a quien pedírselo: bootstrap automático).
         is_first = conn.execute(
-            "SELECT 1 FROM users WHERE password_hash IS NOT NULL LIMIT 1"
+            "SELECT 1 FROM users WHERE password_hash IS NOT NULL OR google_sub IS NOT NULL LIMIT 1"
         ).fetchone() is None
 
         count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
@@ -68,6 +68,42 @@ def register(name: str, email: str, password: str) -> dict:
         _ensure_account(conn, user_id)
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return dict(row)
+
+
+def upsert_google_user(email: str, name: str | None, sub: str | None) -> dict:
+    """Inicia sesión con Google: si el email ya existe, lo reutiliza (y vincula
+    el id de Google); si no, crea una cuenta nueva sin contraseña."""
+    email = (email or "").strip().lower()
+    if not email:
+        raise ValueError("Google no devolvió un email")
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if row:
+            if sub and not row["google_sub"]:
+                conn.execute("UPDATE users SET google_sub = ? WHERE id = ?", (sub, row["id"]))
+            return dict(row)
+
+        is_first = conn.execute(
+            "SELECT 1 FROM users WHERE password_hash IS NOT NULL OR google_sub IS NOT NULL LIMIT 1"
+        ).fetchone() is None
+
+        base = ((name or email.split("@")[0]).strip() or "Usuario")[:24]
+        uname = base
+        n = 1
+        while conn.execute("SELECT 1 FROM users WHERE name = ? COLLATE NOCASE", (uname,)).fetchone():
+            n += 1
+            suffix = f" {n}"
+            uname = base[: 24 - len(suffix)] + suffix
+
+        count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        color = USER_COLORS[count % len(USER_COLORS)]
+        cur = conn.execute(
+            "INSERT INTO users (name, color, created_at, email, google_sub, is_admin) VALUES (?, ?, ?, ?, ?, ?)",
+            (uname, color, time.time(), email, sub, 1 if is_first else 0),
+        )
+        user_id = cur.lastrowid
+        _ensure_account(conn, user_id)
+        return dict(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
 
 
 def login(email: str, password: str) -> dict:
@@ -198,8 +234,8 @@ def list_accounts() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT u.*, a.balance, a.net_contributions FROM users u
-               LEFT JOIN account a ON a.user_id = u.id
-               WHERE u.password_hash IS NOT NULL
+               LEFT JOIN account a ON a.user_id = u.id AND a.profile = 'free'
+               WHERE u.password_hash IS NOT NULL OR u.google_sub IS NOT NULL
                ORDER BY u.created_at"""
         ).fetchall()
         out = []

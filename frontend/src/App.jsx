@@ -118,6 +118,14 @@ export default function App() {
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission();
     }
+    // Si volvemos de un login de Google fallido, avisa y limpia la URL.
+    const qp = new URLSearchParams(window.location.search);
+    if (qp.get("auth_error")) {
+      addToast("No se pudo entrar con Google. Inténtalo de nuevo.", "danger");
+      const url = new URL(window.location.href);
+      url.searchParams.delete("auth_error");
+      window.history.replaceState({}, "", url);
+    }
 
     api
       .me()

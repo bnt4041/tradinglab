@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT UNIQUE,
     password_hash TEXT,
     is_admin INTEGER NOT NULL DEFAULT 0,
-    reset_requested_at REAL
+    reset_requested_at REAL,
+    google_sub TEXT
 );
 
 CREATE TABLE IF NOT EXISTS password_resets (
@@ -404,6 +405,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         if "reset_requested_at" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN reset_requested_at REAL")
+        if "google_sub" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
         if _table_exists(conn, "challenges") and "initial_balance" not in _columns(conn, "challenges"):
             conn.execute("ALTER TABLE challenges ADD COLUMN initial_balance REAL NOT NULL DEFAULT 10000")
 

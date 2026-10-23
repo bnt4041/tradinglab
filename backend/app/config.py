@@ -63,6 +63,11 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "https://tradinglab.pirueta.online")
 
+# ---------------- Google OAuth (login con Google) ----------------
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", PUBLIC_ORIGIN + "/api/auth/google/callback")
+
 # ---------------- Catálogo de instrumentos ----------------
 # id -> {source, yahoo?, name, category, tier}
 # Para cripto el id es el símbolo de Binance (p.ej. BTCUSDT).

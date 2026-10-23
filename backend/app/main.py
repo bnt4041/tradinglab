@@ -1,10 +1,14 @@
 """API FastAPI del emulador de trading (multi-activo + IA local + asesor)."""
 import asyncio
 import contextlib
+import secrets
 import time
+import urllib.parse
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from . import advisor, alerts, assistant, auth, basket, bot, challenges, coach, config, database, external, groups, mailer, market, ml, portfolio, trends, users
@@ -389,6 +393,82 @@ async def reset_password(req: ResetPasswordRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+# ---------------- Login con Google (OAuth2) ----------------
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+OAUTH_STATE_COOKIE = "g_state"
+
+
+@app.get("/api/auth/google/enabled")
+async def google_enabled():
+    return {"enabled": bool(config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET)}
+
+
+@app.get("/api/auth/google/login")
+async def google_login():
+    if not (config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET):
+        raise HTTPException(status_code=503, detail="El acceso con Google no está configurado")
+    state = secrets.token_urlsafe(24)
+    params = {
+        "client_id": config.GOOGLE_CLIENT_ID,
+        "redirect_uri": config.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    resp = RedirectResponse(GOOGLE_AUTH_URL + "?" + urllib.parse.urlencode(params), status_code=302)
+    resp.set_cookie(OAUTH_STATE_COOKIE, state, max_age=600, httponly=True, samesite="lax", secure=True, path="/")
+    return resp
+
+
+@app.get("/api/auth/google/callback")
+async def google_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    def fail(reason: str):
+        return RedirectResponse(f"{config.PUBLIC_ORIGIN}/?auth_error={reason}", status_code=302)
+
+    if error or not code:
+        return fail("google")
+    saved = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not saved or not state or saved != state:
+        return fail("state")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            tok = await client.post(GOOGLE_TOKEN_URL, data={
+                "code": code,
+                "client_id": config.GOOGLE_CLIENT_ID,
+                "client_secret": config.GOOGLE_CLIENT_SECRET,
+                "redirect_uri": config.GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            })
+            if tok.status_code >= 400:
+                return fail("google")
+            access_token = tok.json().get("access_token")
+            if not access_token:
+                return fail("google")
+            ui = await client.get(GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
+            info = ui.json() if ui.status_code < 400 else {}
+    except Exception:  # noqa: BLE001
+        return fail("google")
+
+    email = info.get("email")
+    if not email or info.get("email_verified") is False:
+        return fail("google")
+    try:
+        user = auth.upsert_google_user(email, info.get("name"), info.get("sub"))
+    except ValueError:
+        return fail("google")
+
+    token = auth.create_session(user["id"])
+    resp = RedirectResponse(f"{config.PUBLIC_ORIGIN}/", status_code=302)
+    _set_session_cookie(resp, token)
+    resp.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+    return resp
 
 
 # ---------------- Administración ----------------
