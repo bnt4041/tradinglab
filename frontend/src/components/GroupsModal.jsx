@@ -1,9 +1,18 @@
 import { useEffect, useState } from "react";
 import {
   X, Trophy, Users, Plus, Copy, ArrowLeft, Bot, Calendar, Repeat, Crown, Check,
-  Globe, Coins, Gift, UserPlus,
+  Globe, Coins, Gift, UserPlus, Clock,
 } from "lucide-react";
 import { api, fmt } from "../api";
+
+const fmtWhen = (ts) =>
+  ts ? new Date(ts * 1000).toLocaleString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+const STATUS_LABEL = { upcoming: "Próximo", active: "Activo", finished: "Terminado" };
+const STATUS_CLS = {
+  upcoming: "bg-warn-soft text-warn",
+  active: "bg-up-soft text-up",
+  finished: "bg-slate-200 text-slate-500",
+};
 
 const MARKETS = [
   { id: "cripto", label: "Cripto" },
@@ -257,25 +266,25 @@ function ChallengeList({ title, list, now, onOpen, empty, showParticipants }) {
       ) : (
         <div className="space-y-1.5">
           {list.map((c) => {
-            const finished = c.end_at <= now;
+            const status = c.end_at <= now ? "finished" : c.start_at > now ? "upcoming" : "active";
             return (
               <button key={c.id} onClick={() => onOpen(c.id)}
                 className="flex w-full items-center gap-3 rounded-xl bg-slate-50 px-3 py-2.5 text-left hover:bg-slate-100">
-                <span className={`flex h-9 w-9 items-center justify-center rounded-full ${finished ? "bg-slate-200 text-slate-500" : "bg-up-soft text-up"}`}>
+                <span className={`flex h-9 w-9 items-center justify-center rounded-full ${STATUS_CLS[status]}`}>
                   {c.is_open ? <Globe className="h-4 w-4" /> : <Trophy className="h-4 w-4" />}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-semibold text-slate-800">{c.name}</div>
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-400">
                     <span className="font-semibold text-slate-500">{fmt.usd(c.initial_balance)} USDT</span>
-                    <span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> {c.days}d</span>
+                    <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> {status === "upcoming" ? `empieza ${fmtWhen(c.start_at)}` : `${c.days}d`}</span>
                     <span className="flex items-center gap-1"><Repeat className="h-3 w-3" /> {c.max_trades} mov.</span>
                     {!!c.prize && <span className="flex items-center gap-1 text-warn"><Gift className="h-3 w-3" /> {fmt.compact(c.prize)}</span>}
                     {showParticipants && <span className="flex items-center gap-1"><Users className="h-3 w-3" /> {c.participantCount}{c.max_participants ? `/${c.max_participants}` : ""}</span>}
                   </div>
                 </div>
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${finished ? "bg-slate-200 text-slate-500" : "bg-up-soft text-up"}`}>
-                  {finished ? "Terminado" : "Activo"}
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_CLS[status]}`}>
+                  {STATUS_LABEL[status]}
                 </span>
               </button>
             );
@@ -284,6 +293,12 @@ function ChallengeList({ title, list, now, onOpen, empty, showParticipants }) {
       )}
     </div>
   );
+}
+
+// Fecha/hora local en formato del input datetime-local (YYYY-MM-DDTHH:MM).
+function toLocalInput(date) {
+  const d = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return d.toISOString().slice(0, 16);
 }
 
 function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
@@ -297,6 +312,8 @@ function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
   const [prize, setPrize] = useState(0);
   const [maxParticipants, setMaxParticipants] = useState(0);
   const [markets, setMarkets] = useState(MARKETS.map((m) => m.id));
+  // Por defecto empieza en 1 hora: deja margen para que se apunte gente.
+  const [startLocal, setStartLocal] = useState(() => toLocalInput(new Date(Date.now() + 3600 * 1000)));
 
   const toggleMarket = (id) =>
     setMarkets((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
@@ -304,6 +321,7 @@ function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
   const submit = () => {
     if (!name.trim()) return;
     if (markets.length === 0) return;
+    const startAt = startLocal ? Math.floor(new Date(startLocal).getTime() / 1000) : undefined;
     onSubmit(
       {
         name: name.trim(), days: Number(days), maxTrades: Number(maxTrades), includeBot: bot,
@@ -311,6 +329,7 @@ function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
         entryFee: Number(entryFee) || 0, prize: Number(prize) || 0,
         maxParticipants: Number(maxParticipants) || 0,
         markets: markets.length === MARKETS.length ? [] : markets,
+        startAt,
       },
       { open: forceOpen ? true : isOpen },
     );
@@ -351,6 +370,16 @@ function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
             <input className="input num" type="number" min={1} max={1000} value={maxTrades} onChange={(e) => setMaxTrades(e.target.value)} />
           </label>
         </div>
+
+        <label className="block">
+          <span className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600">
+            <Clock className="h-3 w-3" /> Inicio (fecha y hora)
+          </span>
+          <input className="input" type="datetime-local" value={startLocal} onChange={(e) => setStartLocal(e.target.value)} />
+          <span className="mt-1 block text-[11px] text-slate-400">
+            Las inscripciones se cierran al llegar esta hora; el reto dura {days} días desde aquí.
+          </span>
+        </label>
 
         <div>
           <span className="mb-1 block text-xs font-medium text-slate-600">Mercados en los que se opera</span>
@@ -398,13 +427,14 @@ function ChallengeForm({ allowOpen, forceOpen, onSubmit, busy }) {
 }
 
 function ChallengeView({ detail, currentUserId, onJoin, onEnter, busy }) {
-  const { challenge, ranking, daysLeft, finished, myTradesUsed, participantCount } = detail;
+  const { challenge, ranking, daysLeft, finished, status, registrationOpen, started, myTradesUsed, participantCount } = detail;
   const amIn = ranking.some((r) => r.userId === currentUserId);
   const c = challenge;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-1.5">
+        <Tag icon={Clock} text={STATUS_LABEL[status] || (finished ? "Terminado" : "Activo")} warn={status === "upcoming"} />
         <Tag icon={c.is_open ? Globe : Users} text={c.is_open ? "Reto abierto" : "Reto de grupo"} />
         <Tag icon={Trophy} text={marketLabels(c.markets_list)} />
         {!!c.entry_fee && <Tag icon={Coins} text={`Cuota ${fmt.compact(c.entry_fee)}`} />}
@@ -412,13 +442,19 @@ function ChallengeView({ detail, currentUserId, onJoin, onEnter, busy }) {
       </div>
 
       <div className="grid grid-cols-2 gap-2.5">
-        <StatBox label="Cartera inicial" value={`${fmt.usd(c.initial_balance)} USDT`} />
-        <StatBox label="Días restantes" value={finished ? "0" : daysLeft} />
+        <StatBox label="Empieza" value={fmtWhen(c.start_at)} />
+        <StatBox label={started ? "Días restantes" : "Días de duración"} value={started ? (finished ? "0" : daysLeft) : c.days} />
         <StatBox label="Participantes" value={c.max_participants ? `${participantCount}/${c.max_participants}` : participantCount} />
-        <StatBox label="Tus movimientos" value={amIn ? `${myTradesUsed}/${c.max_trades}` : "—"} />
+        <StatBox label="Cartera inicial" value={`${fmt.usd(c.initial_balance)} USDT`} />
       </div>
 
-      {!amIn && !finished && (
+      {status === "upcoming" && (
+        <div className="rounded-xl border border-warn/20 bg-warn-soft px-3 py-2 text-[12px] text-warn">
+          Las inscripciones están abiertas hasta el <b>{fmtWhen(c.start_at)}</b>. Al llegar esa hora el reto empieza y ya no se admite a nadie más.
+        </div>
+      )}
+
+      {!amIn && registrationOpen && (
         <div>
           <button onClick={onJoin} disabled={busy} className="btn-primary w-full"><Trophy className="h-4 w-4" /> Unirme a este reto</button>
           <p className="mt-1.5 text-center text-[11px] text-slate-400">
@@ -426,8 +462,15 @@ function ChallengeView({ detail, currentUserId, onJoin, onEnter, busy }) {
           </p>
         </div>
       )}
+      {!amIn && !registrationOpen && !finished && (
+        <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-center text-[12px] text-slate-400">
+          Las inscripciones están cerradas: este reto ya ha empezado.
+        </div>
+      )}
       {amIn && !finished && (
-        <button onClick={onEnter} className="btn-primary w-full"><Trophy className="h-4 w-4" /> Operar en mi cartera de este reto</button>
+        <button onClick={onEnter} className="btn-primary w-full">
+          <Trophy className="h-4 w-4" /> {started ? "Operar en mi cartera de este reto" : "Ir a mi cartera del reto"}
+        </button>
       )}
 
       <div>

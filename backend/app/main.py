@@ -240,6 +240,7 @@ class ChallengeCreateRequest(BaseModel):
     prize: float = 0
     maxParticipants: int = 0
     markets: list[str] = []
+    startAt: float | None = None
 
 
 class ResetRequestRequest(BaseModel):
@@ -358,12 +359,15 @@ async def my_profiles(user_id: int = Depends(get_user_id)):
     now = time.time()
     out = [{"key": database.FREE_PROFILE, "name": "Cuenta libre", "kind": "free"}]
     for ch in challenges.my_active_challenges(user_id):
+        st = challenges.status_of(ch, now)
         out.append({
             "key": database.challenge_profile(ch["id"]),
             "name": ch["name"],
             "kind": "challenge",
             "challengeId": ch["id"],
-            "finished": ch["end_at"] <= now,
+            "finished": st["finished"],
+            "status": st["status"],
+            "startAt": ch["start_at"],
             "maxTrades": ch["max_trades"],
             "tradesUsed": challenges.trades_used(ch["id"], user_id),
             "markets": challenges.allowed_markets(ch),
@@ -562,7 +566,7 @@ def _create_challenge_common(req: ChallengeCreateRequest, user_id: int, group_id
     return challenges.create_challenge(
         user_id, req.name, req.days, req.maxTrades, req.includeBot, req.initialBalance,
         group_id=group_id, is_open=is_open, entry_fee=req.entryFee, prize=req.prize,
-        max_participants=req.maxParticipants, markets=req.markets,
+        max_participants=req.maxParticipants, markets=req.markets, start_at=req.startAt,
     )
 
 
@@ -620,11 +624,15 @@ async def challenge_detail(challenge_id: int, user_id: int = Depends(get_user_id
 
     now = time.time()
     challenge["markets_list"] = challenges.allowed_markets(challenge)
+    st = challenges.status_of(challenge, now)
     return {
         "challenge": challenge,
         "ranking": rows,
         "daysLeft": max(0, round((challenge["end_at"] - now) / 86400, 1)),
-        "finished": challenge["end_at"] <= now,
+        "finished": st["finished"],
+        "status": st["status"],
+        "registrationOpen": st["registrationOpen"],
+        "started": st["started"],
         "myTradesUsed": challenges.trades_used(challenge_id, user_id),
         "participantCount": challenges.human_participant_count(challenge_id),
     }

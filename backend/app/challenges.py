@@ -38,6 +38,23 @@ def market_allowed(challenge: dict, symbol: str) -> bool:
     return inst.get("category", "cripto") in allowed_markets(challenge)
 
 
+def status_of(challenge: dict, now: float | None = None) -> dict:
+    """Estado temporal del reto: próximo (inscripción abierta) / activo / terminado."""
+    now = now or time.time()
+    if now < challenge["start_at"]:
+        state = "upcoming"
+    elif now < challenge["end_at"]:
+        state = "active"
+    else:
+        state = "finished"
+    return {
+        "status": state,
+        "registrationOpen": now < challenge["start_at"],
+        "started": now >= challenge["start_at"],
+        "finished": now >= challenge["end_at"],
+    }
+
+
 def human_participant_count(challenge_id: int) -> int:
     with get_conn() as conn:
         return conn.execute(
@@ -52,6 +69,7 @@ def create_challenge(
     created_by: int, name: str, days: int, max_trades: int, include_bot: bool,
     initial_balance: float, *, group_id: int | None = None, is_open: bool = False,
     entry_fee: float = 0, prize: float = 0, max_participants: int = 0, markets: list[str] | None = None,
+    start_at: float | None = None,
 ) -> dict:
     name = (name or "").strip()
     if not name or len(name) > 60:
@@ -79,6 +97,12 @@ def create_challenge(
             raise ValueError("No perteneces a este grupo")
 
     now = time.time()
+    # Hora de inicio: la elige el creador (por defecto, ya). Las inscripciones
+    # se cierran al llegar esta hora y el reto dura `days` desde ahí.
+    start = start_at if (start_at and start_at > now) else now
+    if start > now + 365 * 86400:
+        raise ValueError("La fecha de inicio es demasiado lejana")
+
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO challenges
@@ -87,7 +111,7 @@ def create_challenge(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (group_id, name, days, max_trades, 1 if include_bot else 0, initial_balance,
              1 if is_open else 0, entry_fee, prize, max_participants, markets_str,
-             now, now + days * 86400, created_by, now),
+             start, start + days * 86400, created_by, now),
         )
         challenge_id = cur.lastrowid
         row = dict(conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone())
@@ -144,8 +168,9 @@ def join_challenge(challenge_id: int, user_id: int) -> dict:
     challenge = get_challenge(challenge_id)
     if not challenge:
         raise ValueError("El reto no existe")
-    if challenge["end_at"] <= time.time():
-        raise ValueError("Este reto ya ha terminado")
+    # Las inscripciones se cierran cuando el reto empieza (start_at).
+    if time.time() >= challenge["start_at"] and not is_participant(challenge_id, user_id):
+        raise ValueError("Las inscripciones de este reto están cerradas (ya ha empezado)")
     if not challenge["is_open"] and not groups.is_member(challenge["group_id"], user_id):
         raise ValueError("No perteneces al grupo de este reto")
     if not is_participant(challenge_id, user_id):
@@ -170,7 +195,7 @@ def list_open_challenges(limit: int = 50) -> list[dict]:
             c["participantCount"] = conn.execute(
                 "SELECT COUNT(*) AS n FROM challenge_participants WHERE challenge_id = ?", (c["id"],)
             ).fetchone()["n"]
-            c["finished"] = c["end_at"] <= now
+            c.update(status_of(c, now))
             out.append(c)
         return out
 
@@ -200,7 +225,10 @@ def check_trade_allowed(user_id: int, profile: str, symbol: str | None = None) -
     challenge = get_challenge(cid)
     if not challenge:
         return
-    if challenge["end_at"] <= time.time():
+    now = time.time()
+    if now < challenge["start_at"]:
+        raise ValueError(f"El reto «{challenge['name']}» aún no ha empezado")
+    if challenge["end_at"] <= now:
         raise ValueError(f"El reto «{challenge['name']}» ya ha terminado")
     if symbol is not None and not market_allowed(challenge, symbol):
         labels = ", ".join(config.CATEGORY_LABELS.get(c, c) for c in allowed_markets(challenge))

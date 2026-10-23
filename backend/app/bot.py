@@ -120,7 +120,7 @@ async def run_cycle(prices: dict[str, float]) -> dict:
     # excluye la cripto simplemente no hace nada en él).
     now = time.time()
     for ch in challenges.my_active_challenges(bot_id):
-        if ch["end_at"] <= now:
+        if ch["start_at"] > now or ch["end_at"] <= now:
             continue
         profile = challenge_profile(ch["id"])
         used = portfolio.count_trades(bot_id, profile=profile)

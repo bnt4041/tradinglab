@@ -348,8 +348,10 @@ export default function App() {
           <div className="flex items-center gap-2 text-sm text-brand-800">
             <Trophy className="h-4 w-4 text-brand-600" />
             <span>
-              Estás operando en el reto <b>{activeProfileObj.name}</b>
-              {activeProfileObj.finished
+              {activeProfileObj.status === "upcoming" ? "Reto" : "Estás operando en el reto"} <b>{activeProfileObj.name}</b>
+              {activeProfileObj.status === "upcoming"
+                ? ` · empieza el ${new Date(activeProfileObj.startAt * 1000).toLocaleString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} (aún no puedes operar)`
+                : activeProfileObj.finished
                 ? " · terminado (solo lectura)"
                 : ` · ${activeProfileObj.tradesUsed}/${activeProfileObj.maxTrades} movimientos usados`}
             </span>
